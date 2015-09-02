@@ -2,7 +2,8 @@ function visualiserApp(luigi) {
     var templates = {};
     var invertDependencies = false;
     var typingTimer = 0;
-    var expandTasks = ['runningTasks'];
+    var visType = 'd3';
+    var dt; // DataTable instantiated in $(document).ready()
 
     function loadTemplates() {
         $("script[type='text/template']").each(function(i, element) {
@@ -50,31 +51,153 @@ function visualiserApp(luigi) {
         };
     }
 
-    function indexByProperty(tasks, fieldName) {
-        indexedTasks = {};
-        $.each(tasks, function(i, task) {
-            if (!indexedTasks.hasOwnProperty(task[fieldName])) {
-                indexedTasks[task[fieldName]] = [];
+    function taskToRowData(task) {
+        var taskIdParts = /([A-Za-z0-9_]*)\((.*)\)/.exec(task.taskId);
+        var taskName = taskIdParts[1];
+        var taskParams = taskIdParts[2];
+        var displayTime = new Date(Math.floor(task.start_time*1000)).toLocaleString();
+        //!TODO: time elapsed if running (see taskToDisplayTask)
+        return {
+            taskId: task.taskId,
+            taskName: taskName,
+            taskParams: taskParams,
+            priority: task.priority,
+            displayTime: displayTime,
+            displayTimestamp : task.start_time,
+            trackingUrl: task.trackingUrl,
+            status: task.status,
+            graph: (task.status == "PENDING" || task.status == "RUNNING" || task.status == "DONE"),
+            error: task.status == "FAILED",
+            re_enable: task.status == "DISABLED" && task.re_enable_able
+        };
+    }
+
+    function taskCategoryIcon(category) {
+        var iconClass;
+        var iconColor;
+        switch (category) {
+            case 'PENDING':
+                iconClass = 'fa-pause';
+                iconColor = 'yellow';
+                break;
+            case 'RUNNING':
+                iconClass = 'fa-play';
+                iconColor = 'aqua';
+                break;
+            case 'DONE':
+                iconClass = 'fa-check';
+                iconColor = 'green';
+                break;
+            case 'FAILED':
+                iconClass = 'fa-times';
+                iconColor = 'red';
+                break;
+            case 'DISABLED':
+                iconClass = 'fa-minus-circle';
+                iconColor = 'gray';
+                break;
+            case 'UPSTREAM_FAILED':
+                iconClass = 'fa-warning';
+                iconColor = 'maroon';
+                break;
+            case 'UPSTREAM_DISABLED':
+                iconClass = 'fa-warning';
+                iconColor = 'gray';
+                break;
+            default:
+                iconClass = 'fa-bug';
+                iconColor = 'orange';
+                break;
+        }
+        return '<span class="status-icon bg-' + iconColor + '"><i class="fa ' + iconClass + '"></i></span>';
+    }
+
+
+    /**
+     * Filter table by all activated info boxes.
+     */
+    function filterByCategory(dt) {
+        var infoBoxes = $('.info-box');
+
+        var activeBoxes = [];
+        infoBoxes.each(function (i) {
+            if (infoBoxes[i].dataset.on === 'yes') {
+                activeBoxes.push(infoBoxes[i].dataset.category);
             }
-            indexedTasks[task[fieldName]].push(task);
         });
-        return indexedTasks;
+        // Searched content will be <icon> <category>.
+        var pattern = '\\b(' + activeBoxes.join('|') + ')\\b';
+        dt.column(0).search(pattern, regex=true).draw();
     }
 
-    function entryList(object) {
-        var list = [];
-        $.each(object, function(key, value) {
-            list.push({key: key, value:value});
-        });
-        return list;
+    function filterByTask(task, dt) {
+        if (task === null) {
+            dt.column(1).search('').draw();
+        }
+        else {
+            dt.column(1).search('^' + task + '$', regex = true).draw();
+        }
     }
 
-    function renderTasks(tasks) {
-        var displayTasks = tasks.map($.proxy(taskToDisplayTask, null, true));
-        displayTasks.sort(function(a,b) { return b.displayTimestamp - a.displayTimestamp; });
-        var tasksByFamily = entryList(indexByProperty(displayTasks, "taskName"));
-        tasksByFamily.sort(function(a,b) { return a.key.localeCompare(b.key); });
-        return renderTemplate("rowTemplate", {tasks: tasksByFamily});
+    function toggleInfoBox(infoBox) {
+        var infoBoxColor = infoBox.dataset.color;
+        var infoBoxIcon = $(infoBox).find('.info-box-icon');
+        var colorClass = 'bg-' + infoBoxColor;
+
+        if ((infoBox.dataset.on === undefined) || (infoBox.dataset.on === 'no')) {
+            infoBox.dataset.on = 'yes';
+            infoBoxIcon.removeClass(colorClass);
+            $(infoBox).addClass(colorClass);
+        }
+        else {
+            infoBox.dataset.on = 'no';
+            $(infoBox).removeClass(colorClass);
+            infoBoxIcon.addClass(colorClass);
+        }
+    }
+
+    function renderSidebar(tasks) {
+        // tasks is a list of task names
+        var counts = {};
+        $.each(tasks, function(i) {
+            var name = tasks[i];
+            if (counts[name] === undefined) {
+                counts[name] = 0;
+            }
+            counts[name] += 1;
+        });
+        var taskList = [];
+        $.each(counts, function (name) {
+            taskList.push({name: name, count: counts[name]});
+        });
+        return renderTemplate("sidebarTemplate", {"tasks": taskList});
+    }
+
+    function selectSidebarItem(item) {
+        var sidebarItems = $('.sidebar').find('li');
+        sidebarItems.each(function (i) {
+            var item2 = sidebarItems[i];
+            if (item2.dataset.task === undefined) {
+                return;
+            }
+            if (item === item2) {
+                if ($(item2).hasClass('active')) {
+                    // item is active, deselect
+                    $(item2).removeClass('active');
+                    $(item2).find('.badge').removeClass('bg-green');
+                }
+                else {
+                    // select item
+                    $(item2).addClass('active');
+                    $(item2).find('.badge').addClass('bg-green');
+                }
+            }
+            else {
+                // clear any selection
+                $(item2).removeClass('active');
+                $(item2).find('.badge').removeClass('bg-green');
+            }
+        });
     }
 
     function processWorker(worker) {
@@ -100,35 +223,76 @@ function visualiserApp(luigi) {
         $("#errorModal").modal({});
     }
 
-    function processHashChange() {
+    function makeGraphCallback(visType, taskId, paint) {
+        function depGraphCallbackD3(dependencyGraph) {
+            $("#searchError").empty();
+            $("#searchError").removeClass();
+            if(dependencyGraph.length > 0) {
+                $("#dependencyTitle").text(taskId);
+                if(dependencyGraph != '{}'){
+                    for (var id in dependencyGraph) {
+                        if (dependencyGraph[id].deps.length > 0) {
+                            //console.log(asingInput(dependencyGraph, id));
+                            dependencyGraph[id]['inputQueue']=asingInput(dependencyGraph, id);
+                            dependencyGraph[id]['inputThroughput']=50;
+                            dependencyGraph[id]['count']=5;
+                            dependencyGraph[id]['consumers']=1;
+                        }else{
+                            dependencyGraph[id]['inputThroughput']=50;
+                            dependencyGraph[id]['count']=5;
+                            dependencyGraph[id]['consumers']=1;
+                        }
+                    }
+                }
+            } else {
+              $("#searchError").addClass("alert alert-error");
+              $("#searchError").append("Couldn't find task " + taskId);
+            }
+            drawGraphETL(dependencyGraph, paint);
+            bindGraphEvents();
+        }
+
+        function depGraphCallback (dependencyGraph) {
+            $("#graphPlaceholder svg").empty();
+            $("#searchError").empty();
+            $("#searchError").removeClass();
+            if(dependencyGraph.length > 0) {
+              $("#dependencyTitle").text(taskId);
+              $("#graphPlaceholder").get(0).graph.updateData(dependencyGraph);
+              $("#graphContainer").show();
+              bindGraphEvents();
+            } else {
+              $("#searchError").addClass("alert alert-error");
+              $("#searchError").append("Couldn't find task " + taskId);
+            }
+        }
+
+
+        if (visType == 'd3') {
+            return depGraphCallbackD3;
+        }
+        else {
+            return depGraphCallback;
+        }
+
+    }
+
+    function processHashChange(paint) {
         var hash = location.hash;
         if (hash == "#w") {
             switchTab("workerList");
         } else if (hash) {
             var taskId = hash.substr(1);
-            $("#graphContainer").hide();
-            $("#graphPlaceholder svg").empty();
             $("#searchError").empty();
             $("#searchError").removeClass();
             if (taskId != "g") {
-                depGraphCallback = function(dependencyGraph) {
-                    $("#graphPlaceholder svg").empty();
-                    $("#searchError").empty();
-                    $("#searchError").removeClass();
-                    if(dependencyGraph.length > 0) {
-                      $("#dependencyTitle").text(taskId);
-                      $("#graphPlaceholder").get(0).graph.updateData(dependencyGraph);
-                      $("#graphContainer").show();
-                      bindGraphEvents();
-                    } else {
-                      $("#searchError").addClass("alert alert-error");
-                      $("#searchError").append("Couldn't find task " + taskId);
-                    }
-                }
+                var depGraphCallback = makeGraphCallback(visType, taskId, paint);
+
                 if (invertDependencies) {
                     luigi.getInverseDependencyGraph(taskId, depGraphCallback);
                 } else {
                     luigi.getDependencyGraph(taskId, depGraphCallback);
+                    
                 }
             }
             switchTab("dependencyGraph");
@@ -138,186 +302,364 @@ function visualiserApp(luigi) {
     }
 
     function bindGraphEvents() {
-        $(".graph-node-a").click(function(event) {
-            var taskId = $(this).attr("data-task-id");
-            var status = $(this).attr("data-task-status");
-            if (status=="FAILED") {
+        if (visType === 'd3') {
+            $('.node').click(function(event) {
+                var taskDiv = $(this).find('.taskNode');
+                var taskId = taskDiv.attr("data-task-id");
                 event.preventDefault();
-                luigi.getErrorTrace(taskId, function(error) {
-                   showErrorTrace(error);
-                });
-            }
-        });
+                // NOTE : hasClass() not reliable inside SVG
+                if ($(this).attr('class').match(/\bFAILED\b/)) {
+                    luigi.getErrorTrace(taskId, function (error) {
+                        showErrorTrace(error);
+                    });
+                }
+                else {
+                    window.location.href = 'index.html#' + taskId;
+                }
+            })
+        }
+        else {
+            $(".graph-node-a").click(function(event) {
+                var taskId = $(this).attr("data-task-id");
+                var status = $(this).attr("data-task-status");
+                if (status=="FAILED") {
+                    event.preventDefault();
+                    luigi.getErrorTrace(taskId, function(error) {
+                       showErrorTrace(error);
+                    });
+                }
+            });
+        }
     }
 
     function bindListEvents() {
         $(window).on('hashchange', processHashChange);
         $("#invertCheckbox").click(function() {
             invertDependencies = this.checked;
-            processHashChange();
+            processHashChange(true);
         });
         $("a[href=#list]").click(function() { location.hash=""; });
         $("#loadTaskForm").submit(function(event) {
             event.preventDefault();
             location.hash = $(this).find("input").val();
         });
+
+        $('.info-box').on('click', function () {
+            toggleInfoBox(this);
+            filterByCategory(dt);
+        });
+
+        $('#toggleVisButtons').on('click', 'label', function () {
+            var newVisType = $(this).find('input')[0].value;
+            initVisualisation(newVisType);
+        });
+
     }
 
-    function bindTaskEvents(id, expand) {
-        $(id + " [data-action=expandTaskRows]").click(function(event) {
-            event.preventDefault();
-            var icon = $(this).find("span");
-            if (icon.hasClass("icon-plus")) {
-                icon.removeClass("icon-plus");
-                icon.addClass("icon-minus");
-            } else {
-                icon.removeClass("icon-minus");
-                icon.addClass("icon-plus");
-            }
-            var taskRows = $(this).closest(".taskFamily").find(".taskRows").slideToggle("fast");
-        });
-        if (expand) {
-            $(id + " [data-action=expandTaskRows]").click();
+
+
+    function asingInput(worker, id){
+        if (worker[id].deps.length > 0) {
+            //console.log(worker[id].deps);
+            return worker[id].deps;
         }
-        $(id + " .error-trace-button").click(function() {
-            luigi.getErrorTrace($(this).attr("data-task-id"), function(error) {
-               showErrorTrace(error);
+    }
+
+    function getFinishTime(tasks, listId){
+        var times = {};
+        for (var i = 0; i < listId.length; i++) {
+            for (var j = 0; j < tasks.length; j++) {
+                if (listId[i]===tasks[j].taskId) {
+                    var finishTime = new Date(tasks[j].time_running*1000);
+                    var startTime = new Date(tasks[j].start_time*1000);
+                    var durationTime = new Date((finishTime - startTime)*1000).getSeconds();
+                    times[listId[i]] = durationTime;
+                };
+            };
+        };
+        return times;
+    }
+    function getParam(tasks, id){
+        for (var i = 0; i < tasks.length; i++) {
+            if (tasks[i].taskId === id) {
+                return tasks[i].worker_running;
+            };
+        };
+    }
+    function getStatusTasks(tasks){
+        var status;
+        for (var i = 0; i < tasks.length; i++) {
+            if (tasks[i].status === "DONE") {
+                status = true;
+            }else{
+                return false;
+            }
+        };
+        return status;
+    }
+    function drawGraphETL(tasks, paint){
+    // Set up zoom support
+        var svg = d3.select("#mysvg");
+        var inner = svg.select("g"),
+            zoom = d3.behavior.zoom().on("zoom", function() {
+            inner.attr("transform", "translate(" + d3.event.translate + ")" +
+                "scale(" + d3.event.scale + ")");
             });
+        svg.call(zoom);
+
+        // Create map of taskId to task
+        var taskIdMap = {};
+        $.each(tasks, function (i, task) {
+            taskIdMap[task.taskId] = task;
         });
-        $(id + " .re-enable-button").click(function() {
-            var that = $(this);
-            $(this).attr('disabled', true);
-            luigi.reEnable($(this).attr("data-task-id"), function(data) {
-                if (data.name) {
-                  node = that.closest(".taskFamily").find(".badge-important");
-                  cnt = parseInt(node.text());
-                  cnt --;
-                  node.text(cnt);
-                  that.parent().parent().remove();
+
+        var render = new dagreD3.render();
+        // Left-to-right layout
+        var g = new dagreD3.graphlib.Graph();
+        g.setGraph({
+            nodesep: 70,
+            ranksep: 50,
+            rankdir: "LR",
+            marginx: 20,
+            marginy: 20,
+            height: 400,
+            ranker: "longest-path"
+        });
+
+        function draw(isUpdate) {
+            for (var id in tasks) {
+                var task = tasks[id];
+                var className = task.status;
+                    
+                var html = "<div class='taskNode' data-task-id='" + task.taskId + "'>";
+                html += "<span class=status></span>";
+                html += "<span class=name>"+task.name+"</span>";
+                html += "<span class=queue><span class=counter>"+ task.status +"</span></span>";
+                html += "</div>";
+                g.setNode(task.taskId, {
+                    labelType: "html",
+                    label: html,
+                    rx: 5,
+                    ry: 5,
+                    padding: 0,
+                    class: className
+                });
+                if (task.inputQueue) {
+                    for (var i =  0; i < task.inputQueue.length; i++) {
+                        // Destination node may not be in tasks if this is an inverted graph
+                        if (taskIdMap[task.inputQueue[i]] !== undefined) {
+                            if (task.status === "DONE") {
+                                var durationTime = getFinishTime(tasks, task.inputQueue);
+                                g.setEdge(task.inputQueue[i], task.taskId, {
+                                    label: durationTime[task.inputQueue[i]] + " secs",
+                                    width: 40
+                                });
+                            } else {
+                                g.setEdge(task.inputQueue[i], task.taskId, {
+                                    width: 40
+                                });
+                            }
+                        }
+                    }
+
                 }
-            });
+            }
+            var styleTooltip = function(name, description) {
+                return "<p class='name'>" + name + "</p><p class='description'>" + description + "</p>";
+            };
+            inner.call(render, g);
+            if(paint){
+                // Zoom and scale to fit
+                var zoomScale = zoom.scale();
+                var graphWidth = g.graph().width + 80;
+                var graphHeight = g.graph().height + 40;
+                var width = parseInt(svg.style("width").replace(/px/, ""));
+                var height = parseInt(svg.style("height").replace(/px/, ""));
+                zoomScale = Math.min(width / graphWidth, height / graphHeight);
+                var translate = [(width/2) - ((graphWidth*zoomScale)/2), (height/2) - ((graphHeight*zoomScale)/2)];
+                zoom.translate(translate);
+                zoom.scale(zoomScale);
+                zoom.event(isUpdate ? svg.transition().duration(3000) : d3.select("#mysvg"));
+            }
+
+            inner.selectAll("g.node")
+                .attr("title", function(v) { return styleTooltip(v, getParam(tasks, v)) })
+                .each(function(v) { $(this).tipsy({ gravity: "w", opacity: 1, html: true }); });
+        }
+        draw();
+    }
+
+    /*
+       DataTables functions
+     */
+    // Remove tasks of a given category and add new ones.
+    function updateTaskCategory(dt, category, tasks) {
+        var taskMap = {};
+
+        var mostImportantCategory = function (cat1, cat2) {
+            var priorities = [
+                'RUNNING',
+                'DONE',
+                'PENDING',
+                'UPSTREAM_DISABLED',
+                'UPSTREAM_FAILED',
+                'DISABLED',
+                'FAILED'
+            ];
+            // NOTE : -1 indicates not in list
+            var i1 = priorities.indexOf(cat1);
+            var i2 = priorities.indexOf(cat2);
+            var ret;
+            if (i1 > i2) {
+                ret = cat1;
+            }
+            else {
+                ret = cat2;
+            }
+            return ret;
+        };
+
+        dt.rows(function (i, data) {
+            taskMap[data.taskName] = data.category;
+            return data.category === category;
+        }).remove();
+
+        var displayTasks = tasks.map(taskToRowData);
+        displayTasks = displayTasks.filter(function (obj) {
+            if (category === mostImportantCategory(category, taskMap[obj.taskName])) {
+                obj.category = category;
+                return true;
+            }
+            return false;
+        });
+        dt.rows.add(displayTasks);
+
+        $('#'+category+'_info').find('.info-box-number').html(displayTasks.length);
+        dt.draw();
+
+        $('.sidebar').html(renderSidebar(dt.column(1).data()));
+        $('.sidebar-menu').on('click', 'li', function () {
+            if (this.dataset.task) {
+                selectSidebarItem(this);
+                if ($(this).hasClass('active')) {
+                    filterByTask(this.dataset.task, dt);
+                }
+                else {
+                    filterByTask(null, dt);
+                }
+            }
         });
     }
 
-    function getTaskList(id, tasks, expand) {
-        if (tasks.length == 1 && typeof(tasks[0]) === "number") {
-            var length = tasks[0];
-            var rendered = renderTemplate("rowCountTemplate", {'num_tasks': length});
-            $(id).parent().addClass('emptyTaskGroup');
-        } else {
-            var length = tasks.length;
-            var rendered = renderTasks(tasks);
+    function initVisualisation(newVisType) {
+        visType = newVisType;
+
+        // Prepare graphPlaceholder for D3 code
+        if (visType == 'd3') {
+            $('#graphPlaceholder').empty();
+            $('#graphPlaceholder').html('<div class="live map"><svg width="100%" height="100%" id="mysvg"><g/></svg></div>');
         }
-        $(id).empty();
-        $(id).append(rendered);
-        var header = $(id).prev("h3");
-        var countIndex = header.text().indexOf(" (");
-        if (countIndex != -1) {
-            header.text(header.text().slice(0, countIndex))
-        }
-        header.append(" (" + length + ")");
-        bindTaskEvents(id, expand);
-        filterTasks(false);
-    }
-
-    var lastSearchLoads = {};
-
-    function reloadTasksForFilter() {
-        $('.emptyTaskGroup').children('.taskList').each (function (i, task) {
-            var lastLoad = lastSearchLoads[task.id] || '';
-            var currentLoad = $('#filter-input').val();
-            var hasTooMany = $('#' + task.id + ' .tooManyTasks').length > 0;
-            if (hasTooMany || !currentLoad.startsWith(lastLoad)) {
-                loadTasks(task.id);
-                lastSearchLoads[task.id] = currentLoad;
-            }
-        });
-        updateCount();
-    }
-
-    function filterTasks(reload) {
-        if (reload === undefined || reload) {
-            reloadTasksForFilter();
-        }
-        inputVal = $('#filter-input').val();
-        if (inputVal) {
-            arr = inputVal.split(" ");
-            // hide all columns first
-            $('#taskList .taskRow').addClass('hidden');
-            $('#taskList .taskRow').parent().parent().addClass('hidden');
-
-            // unhide columns that matches filter
-            attrSelector = arr.map(function(a) {
-                return a ? '[data-task-id*=' + a.replace(/\W/g, "\\$&") + ']' : '';
-            }).join("");
-            selector = '.taskRow' + attrSelector;
-            $(selector).removeClass('hidden');
-            $(selector).parent().parent().removeClass('hidden');
-        } else {
-            $('#taskList .taskRow').removeClass('hidden');
-            $('#taskList .taskRow').parent().parent().removeClass('hidden');
+        else {
+            $('#graphPlaceholder').empty();
+            var graph = new Graph.DependencyGraph($("#graphPlaceholder")[0]);
+            $("#graphPlaceholder")[0].graph = graph;
         }
 
-        updateCount();
-    }
+        processHashChange(true);
 
-    function updateCount() {
-        taskGroups = $('#taskList .taskGroup');
-        for (i=0; i<taskGroups.length; i++) {
-            if ($(taskGroups[i]).find('.tooManyTasks').length > 0) {
-                continue;
-            }
-            groupCount = 0;
-
-            // update each task family
-            taskFamilies = $(taskGroups[i]).find('.taskFamily');
-            for (j=0; j<taskFamilies.length; j++) {
-                cnt = $(taskFamilies[j]).find('.taskRow:not(.hidden)').length;
-                groupCount += cnt;
-                node = $(taskFamilies[j]).find(".badge-important");
-                node.text(cnt);
-            }
-
-            // update task group
-            newText = $(taskGroups[i]).find('h3').text().replace(/\d+/, groupCount);
-            $(taskGroups[i]).find('h3').text(newText);
-        }
-    }
-
-    function loadTasks(groupName) {
-        expand = $.inArray(groupName, expandTasks) != -1;
-        getFunc = "get" + groupName[0].toUpperCase() + groupName.slice(1, -1) + "List";
-        luigi[getFunc](function(tasks) { getTaskList("#" + groupName, tasks, expand); });
     }
 
     $(document).ready(function() {
         loadTemplates();
 
-        $('#filter-input').bind("keyup paste", function() {
-            clearTimeout(typingTimer);
-            if ($('#filter-input').val) {
-                typingTimer = setTimeout(filterTasks, 300);
-            }
-        });
-
         luigi.getWorkerList(function(workers) {
             $("#workerList").append(renderWorkers(workers));
         });
 
-        [
-            "runningTasks",
-            "failedTasks",
-            "upstreamFailedTasks",
-            "disabledTasks",
-            "upstreamDisabledTasks",
-            "pendingTasks",
-            "doneTasks",
-        ].forEach(loadTasks);
+        dt = $('#taskTable').DataTable({
+            columns: [
+                {
+                    data: 'category',
+                    render: function (data, type, row) {
+                        return taskCategoryIcon(data)+' '+data;
+                    }
+                },
+                {data: 'taskName'},
+                {data: 'taskParams'},
+                {data: 'displayTime'},
+                {
+                    className: 'details-control',
+                    orderable: false,
+                    data: null,
+                    render: function (data, type, row) {
+                        return Mustache.render(templates['actionsTemplate'], row);
+                    }
+                }
+            ]
+        });
+        
+        luigi.getRunningTaskList(function(runningTasks) {
+            updateTaskCategory(dt, 'RUNNING', runningTasks);
+        });
+
+        luigi.getFailedTaskList(function(failedTasks) {
+            updateTaskCategory(dt, 'FAILED', failedTasks);
+        });
+
+        luigi.getUpstreamFailedTaskList(function(upstreamFailedTasks) {
+            updateTaskCategory(dt, 'UPSTREAM_FAILED', upstreamFailedTasks);
+        });
+
+        luigi.getDisabledTaskList(function(disabledTasks) {
+            updateTaskCategory(dt, 'DISABLED', disabledTasks);
+        });
+
+        luigi.getUpstreamDisabledTaskList(function(upstreamDisabledTasks) {
+            updateTaskCategory(dt, 'UPSTREAM_DISABLED', upstreamDisabledTasks);
+        });
+
+        luigi.getPendingTaskList(function(pendingTasks) {
+            updateTaskCategory(dt, 'PENDING', pendingTasks);
+        });
+
+        luigi.getDoneTaskList(function(doneTasks) {
+            updateTaskCategory(dt, 'DONE', doneTasks);
+        });
 
         bindListEvents();
 
-        var graph = new Graph.DependencyGraph($("#graphPlaceholder")[0]);
-        $("#graphPlaceholder")[0].graph = graph;
-        processHashChange();
+        //var graph = new Graph.DependencyGraph($("#graphPlaceholder")[0]);
+        //$("#graphPlaceholder")[0].graph = graph;
+        // Add event listener for opening and closing details
+
+        $('#taskTable tbody').on('click', 'td.details-control .showError', function () {
+            var tr = $(this).closest('tr');
+            var row = dt.row( tr );
+            var data = row.data();
+
+            if ( row.child.isShown() ) {
+                // This row is already open - close it
+                row.child.hide();
+            }
+            else {
+                // Open this row
+                row.child(Mustache.render(templates['rowDetailsTemplate'], data)).show();
+
+                // If error state is present retrieve the error
+                if (data.error) {
+                    errorTrace = row.child().find('.error-trace');
+                    luigi.getErrorTrace(data.taskId, function(error) {
+                        errorTrace.html('<pre class="pre-scrollable">'+error.error+'</pre>');
+                    });
+                }
+
+
+            }
+
+        } );
+
+        initVisualisation(visType);
+
+        debugHook = initVisualisation;
     });
 }
