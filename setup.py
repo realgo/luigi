@@ -43,7 +43,6 @@ install_requires = [
     'cached_property<2.0',
     'pyparsing<3.0',
     'tornado<5.0',
-    'python-daemon<3.0',
 ]
 
 if os.environ.get('READTHEDOCS', None) == 'True':
