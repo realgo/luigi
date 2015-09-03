@@ -198,7 +198,8 @@ class TaskEvent(Base):
     id = sqlalchemy.Column(sqlalchemy.Integer, primary_key=True)
     task_id = sqlalchemy.Column(sqlalchemy.Integer, sqlalchemy.ForeignKey('tasks.id'))
     event_name = sqlalchemy.Column(sqlalchemy.String(20))
-    ts = sqlalchemy.Column(sqlalchemy.TIMESTAMP, index=True, nullable=False)
+    ts = sqlalchemy.Column(sqlalchemy.DATETIME, index=True, nullable=False)
+    expl = sqlalchemy.Column(sqlalchemy.String(512))
 
     def __repr__(self):
         return "TaskEvent(task_id=%s, event_name=%s, ts=%s" % (self.task_id, self.event_name, self.ts)
