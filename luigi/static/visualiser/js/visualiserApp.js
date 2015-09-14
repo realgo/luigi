@@ -2,8 +2,34 @@ function visualiserApp(luigi) {
     var templates = {};
     var invertDependencies = false;
     var typingTimer = 0;
-    var visType = 'd3';
+    var visType;
     var dt; // DataTable instantiated in $(document).ready()
+    var missingCategories = {};
+    var currentFilter = {
+        taskFamily: "",
+        taskCategory: [],
+        tableFilter: ""
+    };
+
+    function getVisType() {
+        var cookieParts = document.cookie.match(/visType=(.*)/);
+        if (cookieParts === null) {
+            return 'svg';
+        }
+        else {
+            return cookieParts[1];
+        }
+    }
+    function setVisType (newVisType) {
+        visType = newVisType;
+        document.cookie = 'visType=' + visType;
+
+        $('#toggleVisButtons').find('label').removeClass('active');
+        $('#toggleVisButtons').find('input[value="' + visType + '"]').parent().addClass('active');
+
+        return visType;
+    }
+
 
     function loadTemplates() {
         $("script[type='text/template']").each(function(i, element) {
@@ -22,7 +48,10 @@ function visualiserApp(luigi) {
         return dateObject.getHours() + ":" + dateObject.getMinutes() + ":" + dateObject.getSeconds();
     }
 
-    function taskToDisplayTask(showWorker, task) {
+    function taskToDisplayTask(task, showWorker) {
+        if (showWorker === undefined) {
+            showWorker = false;
+        }
         var taskIdParts = /([A-Za-z0-9_]*)\((.*)\)/.exec(task.taskId);
         var taskName = taskIdParts[1];
         var taskParams = taskIdParts[2];
@@ -51,26 +80,6 @@ function visualiserApp(luigi) {
         };
     }
 
-    function taskToRowData(task) {
-        var taskIdParts = /([A-Za-z0-9_]*)\((.*)\)/.exec(task.taskId);
-        var taskName = taskIdParts[1];
-        var taskParams = taskIdParts[2];
-        var displayTime = new Date(Math.floor(task.start_time*1000)).toLocaleString();
-        //!TODO: time elapsed if running (see taskToDisplayTask)
-        return {
-            taskId: task.taskId,
-            taskName: taskName,
-            taskParams: taskParams,
-            priority: task.priority,
-            displayTime: displayTime,
-            displayTimestamp : task.start_time,
-            trackingUrl: task.trackingUrl,
-            status: task.status,
-            graph: (task.status == "PENDING" || task.status == "RUNNING" || task.status == "DONE"),
-            error: task.status == "FAILED",
-            re_enable: task.status == "DISABLED" && task.re_enable_able
-        };
-    }
 
     function taskCategoryIcon(category) {
         var iconClass;
@@ -127,15 +136,17 @@ function visualiserApp(luigi) {
         });
         // Searched content will be <icon> <category>.
         var pattern = '\\b(' + activeBoxes.join('|') + ')\\b';
+        currentFilter.taskCategory = activeBoxes;
         dt.column(0).search(pattern, regex=true).draw();
     }
 
-    function filterByTask(task, dt) {
-        if (task === null) {
+    function filterByTaskFamily(taskFamily, dt) {
+        currentFilter.taskFamily = taskFamily;
+        if (taskFamily === "") {
             dt.column(1).search('').draw();
         }
         else {
-            dt.column(1).search('^' + task + '$', regex = true).draw();
+            dt.column(1).search('^' + taskFamily + '$', regex = true).draw();
         }
     }
 
@@ -200,8 +211,14 @@ function visualiserApp(luigi) {
         });
     }
 
+    function renderWarnings() {
+        return renderTemplate("warningsTemplate",
+            {missingCategories: $.map(missingCategories, function (v, k) {return v})}
+        );
+    }
+
     function processWorker(worker) {
-        worker.tasks = worker.running.map($.proxy(taskToDisplayTask, null, false));
+        worker.tasks = worker.running.map($.proxy(taskToDisplayTask, false, null));
         worker.start_time = new Date(worker.started * 1000).toLocaleString();
         worker.active = new Date(worker.last_active * 1000).toLocaleString();
         return worker;
@@ -216,6 +233,7 @@ function visualiserApp(luigi) {
         $(".tab-pane").removeClass("active");
         $("#"+tabId).addClass("active");
         $(".tabButton[data-tab="+tabId+"]").parent().addClass("active");
+        updateSidebar(tabId);
     }
 
     function showErrorTrace(error) {
@@ -334,6 +352,7 @@ function visualiserApp(luigi) {
 
     function bindListEvents() {
         $(window).on('hashchange', processHashChange);
+        invertDependencies = $('#invertCheckbox')[0].checked;
         $("#invertCheckbox").click(function() {
             invertDependencies = this.checked;
             processHashChange(true);
@@ -350,9 +369,17 @@ function visualiserApp(luigi) {
         });
 
         $('#toggleVisButtons').on('click', 'label', function () {
-            var newVisType = $(this).find('input')[0].value;
-            initVisualisation(newVisType);
+            setVisType($(this).find('input')[0].value);
+            initVisualisation(visType);
         });
+
+        /*
+          Note: The #filter-input element is used by LuigiAPI to constrain requests to the server.
+          When the accompanying button is pressed we force a reload.
+         */
+        $('#serverSide').on('change', 'label', function () {
+            updateTasks();
+        })
 
     }
 
@@ -520,35 +547,59 @@ function visualiserApp(luigi) {
         };
 
         dt.rows(function (i, data) {
-            taskMap[data.taskName] = data.category;
+            taskMap[data.taskId] = data.category;
             return data.category === category;
         }).remove();
 
-        var displayTasks = tasks.map(taskToRowData);
-        displayTasks = displayTasks.filter(function (obj) {
-            if (category === mostImportantCategory(category, taskMap[obj.taskName])) {
-                obj.category = category;
-                return true;
-            }
-            return false;
-        });
-        dt.rows.add(displayTasks);
-
-        $('#'+category+'_info').find('.info-box-number').html(displayTasks.length);
-        dt.draw();
-
-        $('.sidebar').html(renderSidebar(dt.column(1).data()));
-        $('.sidebar-menu').on('click', 'li', function () {
-            if (this.dataset.task) {
-                selectSidebarItem(this);
-                if ($(this).hasClass('active')) {
-                    filterByTask(this.dataset.task, dt);
+        var taskCount;
+        /* Check for integers in tasks.  This indicates max-shown-tasks was exceeded */
+        if (tasks.length === 1 && typeof(tasks[0]) === 'number') {
+            taskCount = tasks[0];
+            missingCategories[category] = {name: category, count: taskCount};
+        }
+        else {
+            var displayTasks = tasks.map(taskToDisplayTask);
+            displayTasks = displayTasks.filter(function (obj) {
+                if (obj === null) {
+                    return false;
                 }
-                else {
-                    filterByTask(null, dt);
+                if (category === mostImportantCategory(category, taskMap[obj.taskId])) {
+                    obj.category = category;
+                    return true;
                 }
+                return false;
+            });
+            dt.rows.add(displayTasks);
+            taskCount = displayTasks.length;
+            delete missingCategories[category];
+        }
+
+
+        $('#'+category+'_info').find('.info-box-number').html(taskCount);
+
+    }
+
+    function updateCurrentFilter() {
+        var content;
+        currentFilter.tableFilter = dt.search();
+
+        if ((currentFilter.tableFilter === "") &&
+            ($.isEmptyObject(currentFilter.taskCategory)) &&
+            (currentFilter.taskFamily === "")) {
+
+            content = '';
+        }
+        else {
+            if (currentFilter.taskCategory !== "") {
+                currentFilter.catNames = $.map(currentFilter.taskCategory, function (x) {
+                    return {name: x};
+                });
             }
-        });
+
+            content = renderTemplate('currentFilterTemplate', currentFilter);
+        }
+
+        $('#currentFilter').html(content);
     }
 
     function initVisualisation(newVisType) {
@@ -569,6 +620,73 @@ function visualiserApp(luigi) {
 
     }
 
+    function updateTasks() {
+        var ajax1 = luigi.getRunningTaskList(function(runningTasks) {
+            updateTaskCategory(dt, 'RUNNING', runningTasks);
+        });
+
+        var ajax2 = luigi.getFailedTaskList(function(failedTasks) {
+            updateTaskCategory(dt, 'FAILED', failedTasks);
+        });
+
+        var ajax3 = luigi.getUpstreamFailedTaskList(function(upstreamFailedTasks) {
+            updateTaskCategory(dt, 'UPSTREAM_FAILED', upstreamFailedTasks);
+        });
+
+        var ajax4 = luigi.getDisabledTaskList(function(disabledTasks) {
+            updateTaskCategory(dt, 'DISABLED', disabledTasks);
+        });
+
+        var ajax5 = luigi.getUpstreamDisabledTaskList(function(upstreamDisabledTasks) {
+            updateTaskCategory(dt, 'UPSTREAM_DISABLED', upstreamDisabledTasks);
+        });
+
+        var ajax6 = luigi.getPendingTaskList(function(pendingTasks) {
+            updateTaskCategory(dt, 'PENDING', pendingTasks);
+        });
+
+        var ajax7 = luigi.getDoneTaskList(function(doneTasks) {
+            updateTaskCategory(dt, 'DONE', doneTasks);
+        });
+
+        $.when(ajax1, ajax2, ajax3, ajax4, ajax5, ajax6, ajax7).done(function () {
+            dt.draw();
+
+            $('.sidebar').html(renderSidebar(dt.column(1).data()));
+            var selectedFamily = $('.sidebar-menu').find('li[data-task="' + currentFilter.taskFamily + '"]')[0];
+            selectSidebarItem(selectedFamily);
+            $('.sidebar-menu').on('click', 'li', function () {
+                if (this.dataset.task) {
+                    selectSidebarItem(this);
+                    if ($(this).hasClass('active')) {
+                        filterByTaskFamily(this.dataset.task, dt);
+                    }
+                    else {
+                        filterByTaskFamily("", dt);
+                    }
+                }
+            });
+
+            if ($.isEmptyObject(missingCategories)) {
+                $('#warnings').html('');
+            }
+            else {
+                $('#warnings').html(renderWarnings());
+            }
+        });
+
+    }
+
+    function updateSidebar(tabName) {
+        if (tabName === 'taskList') {
+            $('body').removeClass('sidebar-collapse');
+        }
+        else {
+            $('body').addClass('sidebar-collapse');
+        }
+
+    }
+
     $(document).ready(function() {
         loadTemplates();
 
@@ -577,6 +695,10 @@ function visualiserApp(luigi) {
         });
 
         dt = $('#taskTable').DataTable({
+            dom: 'l<"#serverSide">frtip',
+            language: {
+                search: 'Filter table:'
+            },
             columns: [
                 {
                     data: 'category',
@@ -585,7 +707,18 @@ function visualiserApp(luigi) {
                     }
                 },
                 {data: 'taskName'},
-                {data: 'taskParams'},
+                {
+                    data: 'taskParams',
+                    render: function(data, type, row) {
+                        if (row.resources !== '{}') {
+                            return '<div>(' + data + ')</div><div>' + row.resources + '</div>';
+                        }
+                        else {
+                            return '<div>(' + data + ')</div>';
+                        }
+                    }
+                },
+                {data: 'priority', width: "2em"},
                 {data: 'displayTime'},
                 {
                     className: 'details-control',
@@ -597,40 +730,27 @@ function visualiserApp(luigi) {
                 }
             ]
         });
-        
-        luigi.getRunningTaskList(function(runningTasks) {
-            updateTaskCategory(dt, 'RUNNING', runningTasks);
+
+        dt.on('draw', updateCurrentFilter);
+
+        $('#serverSide').html('<form class="form-inline"><label class="btn btn-default" for="serverSideCheckbox">' +
+                      'Filter on Server <input type="checkbox" id="serverSideCheckbox"/>' +
+                      '</label></form>');
+
+        // If using server-side filter we need to updateTasks every time the filter changes
+
+        $('#taskTable_filter').on('keyup paste', 'input', function () {
+            if ($('#serverSideCheckbox')[0].checked) {
+                clearTimeout(typingTimer);
+                if ($(this).val) {
+                    typingTimer = setTimeout(updateTasks, 400);
+                }
+            }
         });
 
-        luigi.getFailedTaskList(function(failedTasks) {
-            updateTaskCategory(dt, 'FAILED', failedTasks);
-        });
 
-        luigi.getUpstreamFailedTaskList(function(upstreamFailedTasks) {
-            updateTaskCategory(dt, 'UPSTREAM_FAILED', upstreamFailedTasks);
-        });
-
-        luigi.getDisabledTaskList(function(disabledTasks) {
-            updateTaskCategory(dt, 'DISABLED', disabledTasks);
-        });
-
-        luigi.getUpstreamDisabledTaskList(function(upstreamDisabledTasks) {
-            updateTaskCategory(dt, 'UPSTREAM_DISABLED', upstreamDisabledTasks);
-        });
-
-        luigi.getPendingTaskList(function(pendingTasks) {
-            updateTaskCategory(dt, 'PENDING', pendingTasks);
-        });
-
-        luigi.getDoneTaskList(function(doneTasks) {
-            updateTaskCategory(dt, 'DONE', doneTasks);
-        });
-
+        updateTasks();
         bindListEvents();
-
-        //var graph = new Graph.DependencyGraph($("#graphPlaceholder")[0]);
-        //$("#graphPlaceholder")[0].graph = graph;
-        // Add event listener for opening and closing details
 
         $('#taskTable tbody').on('click', 'td.details-control .showError', function () {
             var tr = $(this).closest('tr');
@@ -658,8 +778,21 @@ function visualiserApp(luigi) {
 
         } );
 
+        $('#taskTable tbody').on('click', 'td.details-control .re-enable-button', function () {
+            var that = $(this);
+            luigi.reEnable($(this).attr("data-task-id"), function(data) {
+                updateTasks();
+            });
+        });
+
+        $('.navbar-nav').on('click', 'a', function () {
+            var tabName = $(this).data('tab');
+            updateSidebar(tabName);
+        });
+
+        visType = getVisType();
+        setVisType(visType);
         initVisualisation(visType);
 
-        debugHook = initVisualisation;
     });
 }
