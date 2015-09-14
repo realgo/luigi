@@ -617,7 +617,7 @@ class CentralPlannerScheduler(Scheduler):
                 # Update the DB only if there was a acctual change, to prevent noise.
                 # We also check for status == PENDING b/c that's the default value
                 # (so checking for status != task.status woule lie)
-                self._update_task_history(task_id, status)
+                self._update_task_history(task_id, status, host=None , expl=expl)
             self._state.set_status(task, PENDING if status == SUSPENDED else status, self._config)
             if status == FAILED:
                 task.retry = self._retry_time(task, self._config)
@@ -844,6 +844,7 @@ class CentralPlannerScheduler(Scheduler):
             'name': task.family,
             'priority': task.priority,
             'resources': task.resources,
+            'expl': task.expl
         }
         if task.status == DISABLED:
             ret['re_enable_able'] = task.scheduler_disable_time is not None
@@ -991,11 +992,11 @@ class CentralPlannerScheduler(Scheduler):
         else:
             return {"taskId": task_id, "error": ""}
 
-    def _update_task_history(self, task_id, status, host=None):
+    def _update_task_history(self, task_id, status, host=None , expl=None):
         try:
             if status == DONE or status == FAILED:
                 successful = (status == DONE)
-                self._task_history.task_finished(task_id, successful)
+                self._task_history.task_finished(task_id, successful, expl)
             elif status == PENDING:
                 self._task_history.task_scheduled(task_id)
             elif status == RUNNING:

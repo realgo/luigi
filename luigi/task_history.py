@@ -52,7 +52,7 @@ class TaskHistory(object):
         pass
 
     @abc.abstractmethod
-    def task_finished(self, task_id, successful):
+    def task_finished(self, task_id, successful, expl):
         pass
 
     @abc.abstractmethod
@@ -67,7 +67,7 @@ class NopHistory(TaskHistory):
     def task_scheduled(self, task_id):
         pass
 
-    def task_finished(self, task_id, successful):
+    def task_finished(self, task_id, successful, expl):
         pass
 
     def task_started(self, task_id, worker_host):

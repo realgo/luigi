@@ -85,10 +85,10 @@ class DbTaskHistory(task_history.TaskHistory):
         task = self._get_task(task_id, status=PENDING)
         self._add_task_event(task, TaskEvent(event_name=PENDING, ts=datetime.datetime.now()))
 
-    def task_finished(self, task_id, successful):
+    def task_finished(self, task_id, successful, expl):
         event_name = DONE if successful else FAILED
         task = self._get_task(task_id, status=event_name)
-        self._add_task_event(task, TaskEvent(event_name=event_name, ts=datetime.datetime.now()))
+        self._add_task_event(task, TaskEvent(event_name=event_name, ts=datetime.datetime.now(), expl=expl))
 
     def task_started(self, task_id, worker_host):
         task = self._get_task(task_id, status=RUNNING, host=worker_host)
@@ -145,13 +145,13 @@ class DbTaskHistory(task_history.TaskHistory):
     def find_latest_runs(self, session=None):
         """
         Return tasks that have been updated in the past 24 hours.
+                # group_by(TaskRecord.id, TaskRecord.name, TaskEvent.event_name, TaskEvent.ts).\
         """
         with self._session(session) as session:
             yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
             return session.query(TaskRecord).\
                 join(TaskEvent).\
                 filter(TaskEvent.ts >= yesterday).\
-                group_by(TaskRecord.id, TaskEvent.event_name, TaskEvent.ts).\
                 order_by(TaskEvent.ts.desc()).\
                 all()
 
