@@ -16,7 +16,7 @@ packages.tar
 
 test/data
 
-Vagrantfile
+
 
 *.pickle
 *.rej
