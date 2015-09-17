@@ -1,7 +1,7 @@
 Source: luigi
 Section: python
 Priority: extra
-Maintainer: Darrell Taylor <darrell@gmail.com>
+Maintainer: Darrell Taylor <darrell@realgo.com>
 Build-Depends: debhelper (>= 9), python, dh-virtualenv (>= 0.6)
 Standards-Version: 3.9.5
 

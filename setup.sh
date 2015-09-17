@@ -44,7 +44,6 @@ fi
 
 color '35;1' 'Updating packages...'
 
-
 color '35;1' 'Installing dependencies from apt-get...'
 apt-get -y install git \
                    wget \
@@ -84,7 +83,9 @@ sudo dpkg-buildpackage -us -uc
 #copy the output back to the shared folder
 cp /tmp/luigibuild/*.deb  /luigi
 
-
+#cleanup
+cd /
+rm /tmp/luigibuild
 
 color '35;1' 'Done!.'
 
