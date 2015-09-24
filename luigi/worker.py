@@ -64,6 +64,15 @@ logger = logging.getLogger('luigi-interface')
 # that may not be unlocked in child process, resulting in the process being locked indefinitely.
 fork_lock = threading.Lock()
 
+# Why we assert on _WAIT_INTERVAL_EPS:
+# multiprocessing.Queue.get() is undefined for timeout=0 it seems:
+# https://docs.python.org/3.4/library/multiprocessing.html#multiprocessing.Queue.get.
+# I also tried with really low epsilon, but then ran into the same issue where
+# the test case "test_external_dependency_worker_is_patient" got stuck. So I
+# unscientifically just set the final value to a floating point number that
+# "worked for me".
+_WAIT_INTERVAL_EPS = 0.00001
+
 
 class TaskException(Exception):
     pass
@@ -116,7 +125,7 @@ class TaskProcess(multiprocessing.Process):
             random.seed((os.getpid(), time.time()))
 
         status = FAILED
-        error_message = ''
+        expl = ''
         missing = []
         new_deps = []
         try:
@@ -146,7 +155,7 @@ class TaskProcess(multiprocessing.Process):
             elif status == DONE:
                 self.task.trigger_event(
                     Event.PROCESSING_TIME, self.task, time.time() - t0)
-                error_message = json.dumps(self.task.on_success())
+                expl = json.dumps(self.task.on_success())
                 logger.info('[pid %s] Worker %s done      %s', os.getpid(),
                             self.worker_id, self.task.task_id)
                 self.task.trigger_event(Event.SUCCESS, self.task)
@@ -159,25 +168,38 @@ class TaskProcess(multiprocessing.Process):
             self.task.trigger_event(Event.FAILURE, self.task, ex)
             subject = "Luigi: %s FAILED" % self.task
 
-            error_message = notifications.wrap_traceback(self.task.on_failure(ex))
+            raw_error_message = self.task.on_failure(ex)
+            notification_error_message = notifications.wrap_traceback(raw_error_message)
+            expl = json.dumps(raw_error_message)
             formatted_error_message = notifications.format_task_error(subject, self.task,
-                                                                      formatted_exception=error_message)
+                                                                      formatted_exception=notification_error_message)
             notifications.send_error_email(subject, formatted_error_message, self.task.owner_email)
         finally:
             self.result_queue.put(
-                (self.task.task_id, status, error_message, missing, new_deps))
+                (self.task.task_id, status, expl, missing, new_deps))
 
     def _recursive_terminate(self):
         import psutil
 
-        parent = psutil.Process(self.pid)
-        for child in parent.children(recursive=True):
-            child.kill()
+        try:
+            parent = psutil.Process(self.pid)
+            children = parent.children(recursive=True)
 
-        parent.kill()
+            # terminate parent. Give it a chance to clean up
+            super(TaskProcess, self).terminate()
+            parent.wait()
+
+            # terminate children
+            for child in children:
+                try:
+                    child.terminate()
+                except psutil.NoSuchProcess:
+                    continue
+        except psutil.NoSuchProcess:
+            return
 
     def terminate(self):
-        """Terminate this process and it's subprocesses."""
+        """Terminate this process and its subprocesses."""
         # default terminate() doesn't cleanup child processes, it orphans them.
         try:
             return self._recursive_terminate()
@@ -252,8 +274,8 @@ class worker(Config):
                                   description='worker-count-uniques means that we will keep a '
                                   'worker alive only if it has a unique pending task, as '
                                   'well as having keep-alive true')
-    wait_interval = IntParameter(default=1,
-                                 config_path=dict(section='core', name='worker-wait-interval'))
+    wait_interval = FloatParameter(default=1.0,
+                                   config_path=dict(section='core', name='worker-wait-interval'))
     max_reschedules = IntParameter(default=1,
                                    config_path=dict(section='core', name='worker-max-reschedules'))
     timeout = IntParameter(default=0,
@@ -315,6 +337,8 @@ class Worker(object):
             worker_id = 'Worker(%s)' % ', '.join(['%s=%s' % (k, v) for k, v in self._worker_info])
 
         self._config = worker(**kwargs)
+
+        assert self._config.wait_interval >= _WAIT_INTERVAL_EPS, "[worker] wait_interval must be positive"
 
         self._id = worker_id
         self._scheduler = scheduler
@@ -652,9 +676,9 @@ class Worker(object):
             self._purge_children()  # Deal with subprocess failures
 
             try:
-                task_id, status, error_message, missing, new_requirements = (
+                task_id, status, expl, missing, new_requirements = (
                     self._task_result_queue.get(
-                        timeout=float(self._config.wait_interval)))
+                        timeout=self._config.wait_interval))
             except Queue.Empty:
                 return
 
@@ -674,7 +698,7 @@ class Worker(object):
             self._add_task(worker=self._id,
                            task_id=task_id,
                            status=status,
-                           expl=error_message,
+                           expl=expl,
                            resources=task.process_resources(),
                            runnable=None,
                            params=task.to_str_params(),
@@ -706,7 +730,7 @@ class Worker(object):
     def _sleeper(self):
         # TODO is exponential backoff necessary?
         while True:
-            wait_interval = self._config.wait_interval + random.randint(1, 5)
+            wait_interval = self._config.wait_interval + random.uniform(1, 5)
             logger.debug('Sleeping for %d seconds', wait_interval)
             time.sleep(wait_interval)
             yield

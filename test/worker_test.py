@@ -192,11 +192,15 @@ class WorkerTest(unittest.TestCase):
         self.assertFalse(b.has_run)
 
     def test_fail(self):
+        class CustomException(BaseException):
+            def __init__(self, msg):
+                self.msg = msg
+
         class A(Task):
 
             def run(self):
                 self.has_run = True
-                raise Exception()
+                raise CustomException('bad things')
 
             def complete(self):
                 return self.has_run
@@ -956,5 +960,11 @@ class TaskLimitTest(unittest.TestCase):
         self.assertTrue(t.complete())
 
 
-if __name__ == '__main__':
-    luigi.run()
+class WorkerConfigurationTest(unittest.TestCase):
+
+    def test_asserts_for_worker(self):
+        """
+        Test that Worker() asserts that it's sanely configured
+        """
+        Worker(wait_interval=1)  # This shouldn't raise
+        self.assertRaises(AssertionError, Worker, wait_interval=0)

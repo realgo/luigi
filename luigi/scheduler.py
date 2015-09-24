@@ -289,11 +289,16 @@ class SimpleTaskState(object):
         self._status_tasks = collections.defaultdict(dict)
         self._active_workers = {}  # map from id to a Worker object
 
+    def get_state(self):
+        return self._tasks, self._active_workers
+
+    def set_state(self, state):
+        self._tasks, self._active_workers = state
+
     def dump(self):
-        state = (self._tasks, self._active_workers)
         try:
             with open(self._state_path, 'wb') as fobj:
-                pickle.dump(state, fobj)
+                pickle.dump(self.get_state(), fobj)
         except IOError:
             logger.warning("Failed saving scheduler state", exc_info=1)
         else:
@@ -310,7 +315,7 @@ class SimpleTaskState(object):
                 logger.exception("Error when loading state. Starting from clean slate.")
                 return
 
-            self._tasks, self._active_workers = state
+            self.set_state(state)
             self._status_tasks = collections.defaultdict(dict)
             for task in six.itervalues(self._tasks):
                 self._status_tasks[task.status][task.id] = task
@@ -611,6 +616,9 @@ class CentralPlannerScheduler(Scheduler):
         if task.remove is not None:
             task.remove = None  # unmark task for removal so it isn't removed after being added
 
+        if expl is not None:
+            task.expl = expl
+
         if not (task.status == RUNNING and status == PENDING):
             # don't allow re-scheduling of task while it is running, it must either fail or succeed first
             if status == PENDING or status != task.status:
@@ -646,9 +654,6 @@ class CentralPlannerScheduler(Scheduler):
             task.workers.add(worker_id)
             self._state.get_worker(worker_id).tasks.add(task)
             task.runnable = runnable
-
-        if expl is not None:
-            task.expl = expl
 
     def add_worker(self, worker, info, **kwargs):
         self._state.get_worker(worker).add_info(info)
