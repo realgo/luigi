@@ -48,12 +48,12 @@ function visualiserApp(luigi) {
         return dateObject.getHours() + ":" + dateObject.getMinutes() + ":" + dateObject.getSeconds();
     }
 
-    function taskToDisplayTask(task, showWorker) {
+   function taskToDisplayTask(task, showWorker) {
         if (showWorker === undefined) {
             showWorker = false;
         }
         var taskIdParts = /([A-Za-z0-9_]*)\((.*)\)/.exec(task.taskId);
-        var taskName = taskIdParts[1];
+        var taskName = taskIdParts[1] + " <br> " + task.expl;
         var taskParams = taskIdParts[2];
         var displayTime = new Date(Math.floor(task.start_time*1000)).toLocaleString();
         if (task.status == "RUNNING" && "time_running" in task) {
@@ -63,6 +63,14 @@ function visualiserApp(luigi) {
             if (showWorker && "worker_running" in task) {
               displayTime += " (" + task.worker_running + ")";
             }
+        }
+        if (task.status == "DONE" && "time_running" in task) {
+            var current_time = new Date().getTime();
+            var minutes_running = Math.round((current_time - task.time_running * 1000) / 1000 / 60);
+            if (minutes_running > 99999){
+                minutes_running = 0;
+            }
+            displayTime += " <br> " + minutes_running + " minutes";
         }
         return {
             taskId: task.taskId,
@@ -219,7 +227,7 @@ function visualiserApp(luigi) {
 
     function processWorker(worker) {
 
-        worker.tasks = worker.running.map($.proxy(taskToDisplayTask, false, null));
+        worker.tasks = worker.running.map(taskToDisplayTask);
 
         worker.start_time = new Date(worker.started * 1000).toLocaleString();
         worker.active = new Date(worker.last_active * 1000).toLocaleString();
