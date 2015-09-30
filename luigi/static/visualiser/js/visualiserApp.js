@@ -53,7 +53,7 @@ function visualiserApp(luigi) {
             showWorker = false;
         }
         var taskIdParts = /([A-Za-z0-9_]*)\((.*)\)/.exec(task.taskId);
-        var taskName = taskIdParts[1] + " <br> " + task.expl;
+        var taskName = taskIdParts[1];
         var taskParams = taskIdParts[2];
         var displayTime = new Date(Math.floor(task.start_time*1000)).toLocaleString();
         if (task.status == "RUNNING" && "time_running" in task) {
