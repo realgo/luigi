@@ -20,10 +20,9 @@ be considered internal to luigi.
 """
 
 import argparse
-import functools
 from contextlib import contextmanager
 from luigi.task_register import Register
-import cached_property
+import sys
 
 
 class CmdlineParser(object):
@@ -61,77 +60,91 @@ class CmdlineParser(object):
         """
         Initialize cmd line args
         """
-        self.cmdline_args = cmdline_args
         known_args, _ = self._build_parser().parse_known_args(args=cmdline_args)
         self._attempt_load_module(known_args)
-        parser = self._build_parser(active_tasks=self._active_tasks())
-        # TODO: Use parse_args instead of parse_known_args, but can't be
-        # done just yet.  Once `--task` is forced, it should be possible
-        known_args, _ = parser.parse_known_args(args=cmdline_args)
+        # We have to parse again now. As the positionally first unrecognized
+        # argument (the task) could be different.
+        known_args, _ = self._build_parser().parse_known_args(args=cmdline_args)
+        root_task = known_args.root_task
+        parser = self._build_parser(root_task=root_task,
+                                    help_all=known_args.core_help_all)
         self._possibly_exit_with_help(parser, known_args)
-        if not self._active_tasks():
+        if not root_task:
             raise SystemExit('No task specified')
+        known_args = parser.parse_args(args=cmdline_args)
         self.known_args = known_args  # Also publically expose parsed arguments
 
     @staticmethod
-    def _build_parser(active_tasks=set()):
+    def _build_parser(root_task=None, help_all=False):
         parser = argparse.ArgumentParser(add_help=False)
 
+        # Unfortunately, we have to set it as optional to argparse, so we can
+        # parse out stuff like `--module` before we call for `--help`.
+        parser.add_argument('root_task',
+                            nargs='?',
+                            help='Task family to run. Is not optional.',
+                            metavar='Required root task',
+                            )
+
         for task_name, is_without_section, param_name, param_obj in Register.get_all_params():
-            add = functools.partial(param_obj._add_to_cmdline_parser, parser,
-                                    param_name, task_name, is_without_section=is_without_section)
-            add(glob=True)
-            if task_name in active_tasks:
-                add(glob=False)
+            is_the_root_task = task_name == root_task
+            help = param_obj.description if any((is_the_root_task, help_all, param_obj.always_in_help)) else argparse.SUPPRESS
+            flag_name_underscores = param_name if is_without_section else task_name + '_' + param_name
+            global_flag_name = '--' + flag_name_underscores.replace('_', '-')
+            parser.add_argument(global_flag_name,
+                                help=help,
+                                action=param_obj._parser_action(),
+                                dest=param_obj._parser_global_dest(param_name, task_name)
+                                )
+            if is_the_root_task:
+                local_flag_name = '--' + param_name.replace('_', '-')
+                parser.add_argument(local_flag_name,
+                                    help=help,
+                                    action=param_obj._parser_action(),
+                                    dest=param_name
+                                    )
 
         return parser
 
-    @cached_property.cached_property
-    def _task_name(self):
+    def get_task_obj(self):
         """
-        Get the task name
-
-        If the task does not exist, raise SystemExit
+        Get the task object
         """
-        parser = self._build_parser()
-        _, unknown = parser.parse_known_args(args=self.cmdline_args)
-        if len(unknown) > 0:
-            task_name = unknown[0]
-            return task_name
+        return self._get_task_cls()(**self._get_task_kwargs())
 
-    def get_task_cls(self):
+    def _get_task_cls(self):
         """
         Get the task class
         """
-        return Register.get_task_cls(self._task_name)
+        return Register.get_task_cls(self.known_args.root_task)
 
-    def is_local_task(self, task_name):
+    def _get_task_kwargs(self):
         """
-        Used to see if unqualified command line parameters should be added too.
+        Get the local task arguments as a dictionary. The return value is in
+        the form ``dict(my_param='my_value', ...)``
         """
-        return task_name in self._active_tasks()
+        res = {}
+        for (param_name, param_obj) in self._get_task_cls().get_params():
+            attr = getattr(self.known_args, param_name)
+            if attr:
+                res.update(((param_name, param_obj.parse(attr)),))
 
-    def _active_tasks(self):
-        """
-        Set of task families that should expose their parameters unqualified.
-        """
-        root_task = self._task_name
-        return set([root_task] if root_task else [])
+        return res
 
     @staticmethod
     def _attempt_load_module(known_args):
         """
         Load the --module parameter
         """
-        module = known_args.module
+        module = known_args.core_module
         if module:
             __import__(module)
 
     @staticmethod
     def _possibly_exit_with_help(parser, known_args):
         """
-        Check if the user passed --help, if so, print a message and exit.
+        Check if the user passed --help[-all], if so, print a message and exit.
         """
-        if known_args.help:
+        if known_args.core_help or known_args.core_help_all:
             parser.print_help()
-            raise SystemExit('Exiting due to --help was passed')
+            sys.exit()

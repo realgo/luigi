@@ -10,6 +10,15 @@ function visualiserApp(luigi) {
         taskCategory: [],
         tableFilter: ""
     };
+    var taskIcons = {
+        PENDING: 'pause',
+        RUNNING: 'play',
+        DONE: 'check',
+        FAILED: 'times',
+        UPSTREAM_FAILED: 'warning',
+        DISABLED: 'minus-circle',
+        UPSTREAM_DISABLED: 'warning'
+    }
 
     function getVisType() {
         var cookieParts = document.cookie.match(/visType=(.*)/);
@@ -60,14 +69,6 @@ function visualiserApp(luigi) {
             time_running = task.time_running;
             displayTime += " | " + minutes_running + " minutes";
         }
-        if (task.status == "DONE" && "time_running" in task) {
-            var current_time = new Date().getTime();
-            var minutes_running = Math.round((current_time - task.time_running * 1000) / 1000 / 60);
-            if (minutes_running > 99999){
-                minutes_running = 0;
-            }
-            displayTime += " <br> " + minutes_running + " minutes";
-        }
         return {
             taskId: task.taskId,
             taskName: taskName,
@@ -77,7 +78,7 @@ function visualiserApp(luigi) {
             displayTime: displayTime,
             displayTimestamp: task.start_time,
             timeRunning: time_running,
-            trackingUrl: task.trackingUrl,
+            trackingUrl: task.tracking_url,
             status: task.status,
             graph: (task.status == "PENDING" || task.status == "RUNNING" || task.status == "DONE"),
             error: task.status == "FAILED",
@@ -223,7 +224,6 @@ function visualiserApp(luigi) {
     }
 
     function processWorker(worker) {
-
         worker.tasks = worker.running.map(taskToDisplayTask);
         worker.tasks.sort(function(task1, task2) { return task1.timeRunning - task2.timeRunning; });
         worker.start_time = new Date(worker.started * 1000).toLocaleString();
@@ -583,6 +583,7 @@ function visualiserApp(luigi) {
 
 
         $('#'+category+'_info').find('.info-box-number').html(taskCount);
+        $('#'+category+'_info i.fa').removeClass().addClass('fa fa-'+taskIcons[category]);
 
     }
 
@@ -628,6 +629,9 @@ function visualiserApp(luigi) {
     }
 
     function updateTasks() {
+        $('.status-info .info-box-number').text('?');
+        $('.status-info i.fa').removeClass().addClass('fa fa-spinner fa-pulse');
+
         var ajax1 = luigi.getRunningTaskList(function(runningTasks) {
             updateTaskCategory(dt, 'RUNNING', runningTasks);
         });
@@ -682,7 +686,6 @@ function visualiserApp(luigi) {
             }
         });
 
-
     }
 
     function updateSidebar(tabName) {
@@ -706,7 +709,6 @@ function visualiserApp(luigi) {
             decoded = error;
         }
         return decoded;
-
     }
 
     $(document).ready(function() {
@@ -791,9 +793,7 @@ function visualiserApp(luigi) {
                 if (data.error) {
                     errorTrace = row.child().find('.error-trace');
                     luigi.getErrorTrace(data.taskId, function(error) {
-
                         errorTrace.html('<pre class="pre-scrollable">'+decodeError(error.error)+'</pre>');
-
                     });
                 }
 

@@ -168,7 +168,8 @@ def _get_default(x, default):
 class Task(object):
 
     def __init__(self, task_id, status, deps, resources=None, priority=0, family='', module=None,
-                 params=None, disable_failures=None, disable_window=None, disable_hard_timeout=None):
+                 params=None, disable_failures=None, disable_window=None, disable_hard_timeout=None,
+                 tracking_url=None):
         self.id = task_id
         self.stakeholders = set()  # workers ids that are somehow related to this task (i.e. don't prune while any of these workers are still active)
         self.workers = set()  # workers ids that can perform task - task is 'BROKEN' if none of these workers are active
@@ -191,6 +192,7 @@ class Task(object):
         self.disable_failures = disable_failures
         self.disable_hard_timeout = disable_hard_timeout
         self.failures = Failures(disable_window)
+        self.tracking_url = tracking_url
         self.scheduler_disable_time = None
         self.runnable = False
 
@@ -226,6 +228,7 @@ class Worker(object):
         self.id = worker_id
         self.reference = None  # reference to the worker in the real world. (Currently a dict containing just the host)
         self.last_active = last_active or time.time()  # seconds since epoch
+        self.last_get_work = None
         self.started = time.time()  # seconds since epoch
         self.tasks = set()  # task objects
         self.info = {}
@@ -233,10 +236,12 @@ class Worker(object):
     def add_info(self, info):
         self.info.update(info)
 
-    def update(self, worker_reference):
+    def update(self, worker_reference, get_work=False):
         if worker_reference:
             self.reference = worker_reference
         self.last_active = time.time()
+        if get_work:
+            self.last_get_work = time.time()
 
     def prune(self, config):
         # Delete workers that haven't said anything for a while (probably killed)
@@ -389,10 +394,6 @@ class SimpleTaskState(object):
         if new_status == FAILED:
             assert config is not None
 
-        # not sure why we have SUSPENDED, as it can never be set
-        if new_status == SUSPENDED:
-            new_status = PENDING
-
         if new_status == DISABLED and task.status == RUNNING:
             return
 
@@ -469,9 +470,13 @@ class SimpleTaskState(object):
             task_obj = self._tasks.pop(task)
             self._status_tasks[task_obj.status].pop(task)
 
-    def get_active_workers(self, last_active_lt=None):
+    def get_active_workers(self, last_active_lt=None, last_get_work_gt=None):
         for worker in six.itervalues(self._active_workers):
             if last_active_lt is not None and worker.last_active >= last_active_lt:
+                continue
+            last_get_work = getattr(worker, 'last_get_work', None)
+            if last_get_work_gt is not None and (
+                    last_get_work is None or last_get_work <= last_get_work_gt):
                 continue
             yield worker
 
@@ -533,6 +538,7 @@ class CentralPlannerScheduler(Scheduler):
             Task, disable_failures=self._config.disable_failures,
             disable_hard_timeout=self._config.disable_hard_timeout,
             disable_window=self._config.disable_window)
+        self._worker_requests = {}
 
     def load(self):
         self._state.load()
@@ -567,12 +573,12 @@ class CentralPlannerScheduler(Scheduler):
 
         logger.info("Done pruning task graph")
 
-    def update(self, worker_id, worker_reference=None):
+    def update(self, worker_id, worker_reference=None, get_work=False):
         """
         Keep track of whenever the worker was last active.
         """
         worker = self._state.get_worker(worker_id)
-        worker.update(worker_reference)
+        worker.update(worker_reference, get_work=get_work)
 
     def _update_priority(self, task, prio, worker):
         """
@@ -590,7 +596,7 @@ class CentralPlannerScheduler(Scheduler):
     def add_task(self, task_id=None, status=PENDING, runnable=True,
                  deps=None, new_deps=None, expl=None, resources=None,
                  priority=0, family='', module=None, params=None,
-                 assistant=False, **kwargs):
+                 assistant=False, tracking_url=None, **kwargs):
         """
         * add task identified by task_id if it doesn't exist
         * if deps is not None, update dependency list
@@ -613,19 +619,22 @@ class CentralPlannerScheduler(Scheduler):
         if not task.params:
             task.params = _get_default(params, {})
 
+        if tracking_url is not None or task.status != RUNNING:
+            task.tracking_url = tracking_url
+
         if task.remove is not None:
             task.remove = None  # unmark task for removal so it isn't removed after being added
 
         if expl is not None:
             task.expl = expl
 
-        if not (task.status == RUNNING and status == PENDING):
+        if not (task.status == RUNNING and status == PENDING) or new_deps:
             # don't allow re-scheduling of task while it is running, it must either fail or succeed first
             if status == PENDING or status != task.status:
                 # Update the DB only if there was a acctual change, to prevent noise.
                 # We also check for status == PENDING b/c that's the default value
                 # (so checking for status != task.status woule lie)
-                self._update_task_history(task_id, status, host=None , expl=expl)
+                self._update_task_history(task, status)
             self._state.set_status(task, PENDING if status == SUSPENDED else status, self._config)
             if status == FAILED:
                 task.retry = self._retry_time(task, self._config)
@@ -722,7 +731,7 @@ class CentralPlannerScheduler(Scheduler):
 
         worker_id = kwargs['worker']
         # Return remaining tasks that have no FAILED descendants
-        self.update(worker_id, {'host': host})
+        self.update(worker_id, {'host': host}, get_work=True)
         if assistant:
             self.add_worker(worker_id, [('assistant', assistant)])
         best_task = None
@@ -741,8 +750,10 @@ class CentralPlannerScheduler(Scheduler):
         else:
             relevant_tasks = self._state.get_pending_tasks()
             used_resources = self._used_resources()
+            activity_limit = time.time() - self._config.worker_disconnect_delay
+            active_workers = self._state.get_active_workers(last_get_work_gt=activity_limit)
             greedy_workers = dict((worker.id, worker.info.get('workers', 1))
-                                  for worker in self._state.get_active_workers())
+                                  for worker in active_workers)
         tasks = list(relevant_tasks)
         tasks.sort(key=self._rank, reverse=True)
 
@@ -796,7 +807,7 @@ class CentralPlannerScheduler(Scheduler):
             self._state.set_status(best_task, RUNNING, self._config)
             best_task.worker_running = worker_id
             best_task.time_running = time.time()
-            self._update_task_history(best_task.id, RUNNING, host=host)
+            self._update_task_history(best_task, RUNNING, host=host)
 
             reply['task_id'] = best_task.id
             reply['task_family'] = best_task.family
@@ -849,7 +860,7 @@ class CentralPlannerScheduler(Scheduler):
             'name': task.family,
             'priority': task.priority,
             'resources': task.resources,
-            'expl': task.expl
+            'tracking_url': getattr(task, "tracking_url", None),
         }
         if task.status == DISABLED:
             ret['re_enable_able'] = task.scheduler_disable_time is not None
@@ -997,15 +1008,15 @@ class CentralPlannerScheduler(Scheduler):
         else:
             return {"taskId": task_id, "error": ""}
 
-    def _update_task_history(self, task_id, status, host=None , expl=None):
+    def _update_task_history(self, task, status, host=None):
         try:
             if status == DONE or status == FAILED:
                 successful = (status == DONE)
-                self._task_history.task_finished(task_id, successful, expl)
+                self._task_history.task_finished(task, successful)
             elif status == PENDING:
-                self._task_history.task_scheduled(task_id)
+                self._task_history.task_scheduled(task)
             elif status == RUNNING:
-                self._task_history.task_started(task_id, host)
+                self._task_history.task_started(task, host)
         except BaseException:
             logger.warning("Error saving Task history", exc_info=True)
 

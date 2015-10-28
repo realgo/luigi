@@ -134,6 +134,44 @@ class CentralPlannerTest(unittest.TestCase):
 
         self.assertEqual(self.sch.get_work(worker='Y')['task_id'], 'A')
 
+    def test_do_not_overwrite_tracking_url_while_running(self):
+        self.sch.add_task(task_id='A', worker='X', status='RUNNING', tracking_url='trackme')
+        self.assertEqual('trackme', self.sch.task_list('RUNNING', '')['A']['tracking_url'])
+
+        # not wiped out by another working scheduling as pending
+        self.sch.add_task(task_id='A', worker='Y', status='PENDING')
+        self.assertEqual('trackme', self.sch.task_list('RUNNING', '')['A']['tracking_url'])
+
+    def test_do_update_tracking_url_while_running(self):
+        self.sch.add_task(task_id='A', worker='X', status='RUNNING', tracking_url='trackme')
+        self.assertEqual('trackme', self.sch.task_list('RUNNING', '')['A']['tracking_url'])
+
+        self.sch.add_task(task_id='A', worker='X', status='RUNNING', tracking_url='stage_2')
+        self.assertEqual('stage_2', self.sch.task_list('RUNNING', '')['A']['tracking_url'])
+
+    def test_keep_tracking_url_on_done_and_fail(self):
+        for status in ('DONE', 'FAILED'):
+            self.sch.add_task(task_id='A', worker='X', status='RUNNING', tracking_url='trackme')
+            self.assertEqual('trackme', self.sch.task_list('RUNNING', '')['A']['tracking_url'])
+
+            self.sch.add_task(task_id='A', worker='X', status=status)
+            self.assertEqual('trackme', self.sch.task_list(status, '')['A']['tracking_url'])
+
+    def test_drop_tracking_url_when_rescheduled_while_not_running(self):
+        for status in ('DONE', 'FAILED', 'PENDING'):
+            self.sch.add_task(task_id='A', worker='X', status=status, tracking_url='trackme')
+            self.assertEqual('trackme', self.sch.task_list(status, '')['A']['tracking_url'])
+
+            self.sch.add_task(task_id='A', worker='Y', status='PENDING')
+            self.assertIsNone(self.sch.task_list('PENDING', '')['A']['tracking_url'])
+
+    def test_reset_tracking_url_on_new_run(self):
+        self.sch.add_task(task_id='A', worker='X', status='PENDING', tracking_url='trackme')
+        self.assertEqual('trackme', self.sch.task_list('PENDING', '')['A']['tracking_url'])
+
+        self.sch.add_task(task_id='A', worker='Y', status='RUNNING')
+        self.assertIsNone(self.sch.task_list('RUNNING', '')['A']['tracking_url'])
+
     def test_remove_dep(self):
         # X schedules A -> B, A is broken
         # Y schedules C -> B: this should remove A as a dep of B
@@ -343,6 +381,7 @@ class CentralPlannerTest(unittest.TestCase):
         self.assertEqual('C', self.sch.get_work(worker='Y')['task_id'])
 
     def test_lock_resources_when_one_of_multiple_workers_is_ready(self):
+        self.sch.get_work(worker='X')  # indicate to the scheduler that X is active
         self.sch.add_task(worker='X', task_id='A', priority=10)
         self.sch.add_task(worker='X', task_id='B', resources={'R': 1}, priority=5)
         self.sch.add_task(worker='Y', task_id='C', resources={'R': 1}, priority=1)
@@ -375,6 +414,7 @@ class CentralPlannerTest(unittest.TestCase):
         self.assertFalse(self.sch.get_work(worker='Y')['task_id'])
 
     def test_lock_resources_for_second_worker(self):
+        self.sch.get_work(worker='Y')  # indicate to the scheduler that Y is active
         self.sch.add_task(worker='X', task_id='A', resources={'R': 1})
         self.sch.add_task(worker='X', task_id='B', resources={'R': 1})
         self.sch.add_task(worker='Y', task_id='C', resources={'R': 1}, priority=10)
@@ -455,6 +495,7 @@ class CentralPlannerTest(unittest.TestCase):
         self.check_task_order('B')
 
     def test_multiple_resources_lock(self):
+        self.sch.get_work(worker='X')  # indicate to the scheduler that X is active
         self.sch.add_task(worker='X', task_id='A', resources={'r1': 1, 'r2': 1}, priority=10)
         self.sch.add_task(worker=WORKER, task_id='B', resources={'r2': 1})
         self.sch.add_task(worker=WORKER, task_id='C', resources={'r1': 1})
@@ -472,6 +513,23 @@ class CentralPlannerTest(unittest.TestCase):
         self.assertEqual('A', self.sch.get_work(worker=WORKER)['task_id'])
         # C doesn't block B, so it can go first
         self.check_task_order('C')
+
+    def test_allow_resource_use_while_scheduling(self):
+        self.sch.update_resources(r1=1)
+        self.sch.add_task(worker='SCHEDULING', task_id='A', resources={'r1': 1}, priority=10)
+        self.sch.add_task(worker=WORKER, task_id='B', resources={'r1': 1}, priority=1)
+        self.assertEqual('B', self.sch.get_work(worker=WORKER)['task_id'])
+
+    def test_stop_locking_resource_for_uninterested_worker(self):
+        self.setTime(0)
+        self.sch.update_resources(r1=1)
+        self.assertIsNone(self.sch.get_work(worker=WORKER)['task_id'])
+        self.sch.add_task(worker=WORKER, task_id='A', resources={'r1': 1}, priority=10)
+        self.sch.add_task(worker='LOW_PRIO', task_id='B', resources={'r1': 1}, priority=1)
+        self.assertIsNone(self.sch.get_work(worker='LOW_PRIO')['task_id'])
+
+        self.setTime(120)
+        self.assertEqual('B', self.sch.get_work(worker='LOW_PRIO')['task_id'])
 
     def check_task_order(self, order):
         for expected_id in order:

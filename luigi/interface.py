@@ -72,7 +72,8 @@ class core(task.Config):
 
     local_scheduler = parameter.BoolParameter(
         default=False,
-        description='Use local scheduling')
+        description='Use an in-memory central scheduler. Useful for testing.',
+        always_in_help=True)
     scheduler_host = parameter.Parameter(
         default='localhost',
         description='Hostname of machine running remote scheduler',
@@ -106,7 +107,8 @@ class core(task.Config):
         description='Configuration file for logging')
     module = parameter.Parameter(
         default=None,
-        description='Used for dynamic loading of modules')
+        description='Used for dynamic loading of modules',
+        always_in_help=True)
     parallel_scheduling = parameter.BoolParameter(
         default=False,
         description='Use multiprocessing to do scheduling in parallel.')
@@ -115,7 +117,12 @@ class core(task.Config):
         description='Run any task from the scheduler.')
     help = parameter.BoolParameter(
         default=False,
-        description='Help option flag, for --help')
+        description='Show most common flags and all task-specific flags',
+        always_in_help=True)
+    help_all = parameter.BoolParameter(
+        default=False,
+        description='Show all command line flags',
+        always_in_help=True)
 
 
 class _WorkerSchedulerFactory(object):
@@ -160,7 +167,7 @@ def _schedule_and_run(tasks, worker_scheduler_factory=None, override_defaults=No
     kill_signal = signal.SIGUSR1 if env_params.take_lock else None
     if (not env_params.no_lock and
             not(lock.acquire_for(env_params.lock_pid_dir, env_params.lock_size, kill_signal))):
-        sys.exit(1)
+        raise PidLockAlreadyTakenExit()
 
     if env_params.local_scheduler:
         sch = worker_scheduler_factory.create_local_scheduler()
@@ -186,11 +193,22 @@ def _schedule_and_run(tasks, worker_scheduler_factory=None, override_defaults=No
         success &= w.run()
     w.stop()
     logger.info(execution_summary.summary(w))
-    return success
+    return dict(success=success, worker=w)
 
 
-def run(cmdline_args=None, main_task_cls=None,
-        worker_scheduler_factory=None, use_dynamic_argparse=None, local_scheduler=False):
+class PidLockAlreadyTakenExit(SystemExit):
+    """
+    The exception thrown by :py:func:`luigi.run`, when the lock file is inaccessible
+    """
+    pass
+
+
+def run(*args, **kwargs):
+    return _run(*args, **kwargs)['success']
+
+
+def _run(cmdline_args=None, main_task_cls=None,
+         worker_scheduler_factory=None, use_dynamic_argparse=None, local_scheduler=False):
     """
     Please dont use. Instead use `luigi` binary.
 
@@ -214,9 +232,7 @@ def run(cmdline_args=None, main_task_cls=None,
         cmdline_args.insert(0, '--local-scheduler')
 
     with CmdlineParser.global_instance(cmdline_args) as cp:
-        task_cls = cp.get_task_cls()
-        task = task_cls()
-        return _schedule_and_run([task], worker_scheduler_factory)
+        return _schedule_and_run([cp.get_task_obj()], worker_scheduler_factory)
 
 
 def build(tasks, worker_scheduler_factory=None, **env_params):
@@ -242,4 +258,4 @@ def build(tasks, worker_scheduler_factory=None, **env_params):
     if "no_lock" not in env_params:
         env_params["no_lock"] = True
 
-    return _schedule_and_run(tasks, worker_scheduler_factory, override_defaults=env_params)
+    return _schedule_and_run(tasks, worker_scheduler_factory, override_defaults=env_params)['success']

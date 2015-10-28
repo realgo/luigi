@@ -58,12 +58,6 @@ def namespace(namespace=None):
     Register._default_namespace = namespace
 
 
-def id_to_name_and_params(task_id):
-    # DEPRECATED
-    import luigi.tools.parse_task
-    return luigi.tools.parse_task.id_to_name_and_params(task_id)
-
-
 class BulkCompleteNotImplementedError(NotImplementedError):
     """This is here to trick pylint.
 
@@ -119,7 +113,8 @@ class Task(object):
 
     #: Number of seconds after which to time out the run function.
     #: No timeout if set to 0.
-    #: Defaults to 0 or value in luigi.cfg
+    #: Defaults to 0 or worker-timeout value in config file
+    #: Only works when using multiple workers.
     worker_timeout = None
 
     @property

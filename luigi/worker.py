@@ -47,10 +47,11 @@ from luigi import six
 from luigi import notifications
 from luigi.event import Event
 from luigi.task_register import load_task
-from luigi.scheduler import DISABLED, DONE, FAILED, PENDING, RUNNING, SUSPENDED, CentralPlannerScheduler
+from luigi.scheduler import DISABLED, DONE, FAILED, PENDING, CentralPlannerScheduler
 from luigi.target import Target
 from luigi.task import Task, flatten, getpaths, Config
 from luigi.task_register import TaskClassException
+from luigi.task_status import RUNNING
 from luigi.parameter import FloatParameter, IntParameter, BoolParameter
 
 try:
@@ -84,18 +85,25 @@ class TaskProcess(multiprocessing.Process):
 
     Mainly for convenience since this is run in a separate process. """
 
-    def __init__(self, task, worker_id, result_queue, random_seed=False, worker_timeout=0):
+    def __init__(self, task, worker_id, result_queue, random_seed=False, worker_timeout=0,
+                 tracking_url_callback=None):
         super(TaskProcess, self).__init__()
         self.task = task
         self.worker_id = worker_id
         self.result_queue = result_queue
         self.random_seed = random_seed
+        self.tracking_url_callback = tracking_url_callback
         if task.worker_timeout is not None:
             worker_timeout = task.worker_timeout
         self.timeout_time = time.time() + worker_timeout if worker_timeout else None
 
     def _run_get_new_deps(self):
-        task_gen = self.task.run()
+        try:
+            task_gen = self.task.run(tracking_url_callback=self.tracking_url_callback)
+        except TypeError as ex:
+            if 'unexpected keyword argument' not in getattr(ex, 'message', ex.args[0]):
+                raise
+            task_gen = self.task.run()
         if not isinstance(task_gen, types.GeneratorType):
             return None
 
@@ -145,13 +153,12 @@ class TaskProcess(multiprocessing.Process):
                 status = DONE if self.task.complete() else FAILED
             else:
                 new_deps = self._run_get_new_deps()
-                status = DONE if not new_deps else SUSPENDED
+                status = DONE if not new_deps else PENDING
 
-            if status == SUSPENDED:
+            if new_deps:
                 logger.info(
                     '[pid %s] Worker %s new requirements      %s',
                     os.getpid(), self.worker_id, self.task.task_id)
-
             elif status == DONE:
                 self.task.trigger_event(
                     Event.PROCESSING_TIME, self.task, time.time() - t0)
@@ -166,17 +173,19 @@ class TaskProcess(multiprocessing.Process):
             status = FAILED
             logger.exception("[pid %s] Worker %s failed    %s", os.getpid(), self.worker_id, self.task)
             self.task.trigger_event(Event.FAILURE, self.task, ex)
-            subject = "Luigi: %s FAILED" % self.task
-
             raw_error_message = self.task.on_failure(ex)
-            notification_error_message = notifications.wrap_traceback(raw_error_message)
             expl = json.dumps(raw_error_message)
-            formatted_error_message = notifications.format_task_error(subject, self.task,
-                                                                      formatted_exception=notification_error_message)
-            notifications.send_error_email(subject, formatted_error_message, self.task.owner_email)
+            self._send_error_notification(raw_error_message)
         finally:
             self.result_queue.put(
                 (self.task.task_id, status, expl, missing, new_deps))
+
+    def _send_error_notification(self, raw_error_message):
+        subject = "Luigi: %s FAILED" % self.task
+        notification_error_message = notifications.wrap_traceback(raw_error_message)
+        formatted_error_message = notifications.format_task_error(subject, self.task,
+                                                                  formatted_exception=notification_error_message)
+        notifications.send_error_email(subject, formatted_error_message, self.task.owner_email)
 
     def _recursive_terminate(self):
         import psutil
@@ -276,6 +285,8 @@ class worker(Config):
                                   'well as having keep-alive true')
     wait_interval = FloatParameter(default=1.0,
                                    config_path=dict(section='core', name='worker-wait-interval'))
+    wait_jitter = FloatParameter(default=5.0)
+
     max_reschedules = IntParameter(default=1,
                                    config_path=dict(section='core', name='worker-max-reschedules'))
     timeout = IntParameter(default=0,
@@ -339,6 +350,7 @@ class Worker(object):
         self._config = worker(**kwargs)
 
         assert self._config.wait_interval >= _WAIT_INTERVAL_EPS, "[worker] wait_interval must be positive"
+        assert self._config.wait_jitter >= 0.0, "[worker] wait_jitter must be equal or greater than zero"
 
         self._id = worker_id
         self._scheduler = scheduler
@@ -355,7 +367,7 @@ class Worker(object):
         self.run_succeeded = True
         self.unfulfilled_counts = collections.defaultdict(int)
 
-        signal.signal(signal.SIGTERM, self.handle_interrupt)
+        signal.signal(signal.SIGUSR1, self.handle_interrupt)
 
         self._keep_alive_thread = KeepAliveThread(self._scheduler, self._id, self._config.ping_interval)
         self._keep_alive_thread.daemon = True
@@ -374,11 +386,16 @@ class Worker(object):
         Call ``self._scheduler.add_task``, but store the values too so we can
         implement :py:func:`luigi.execution_summary.summary`.
         """
-        task = self._scheduled_tasks.get(kwargs['task_id'])
+        task_id = kwargs['task_id']
+        status = kwargs['status']
+        runnable = kwargs['runnable']
+        task = self._scheduled_tasks.get(task_id)
         if task:
-            msg = (task, kwargs['status'], kwargs['runnable'])
+            msg = (task, status, runnable)
             self._add_task_history.append(msg)
         self._scheduler.add_task(*args, **kwargs)
+
+        logger.info('Informed scheduler that task   %s   has status   %s', task_id, status)
 
     def stop(self):
         """
@@ -563,8 +580,6 @@ class Worker(object):
                        family=task.task_family,
                        module=task.task_module)
 
-        logger.info('Scheduled %s (%s)', task.task_id, status)
-
     def _validate_dependency(self, dependency):
         if isinstance(dependency, Target):
             raise Exception('requires() can not return Target objects. Wrap it in an ExternalTask class')
@@ -632,9 +647,7 @@ class Worker(object):
     def _run_task(self, task_id):
         task = self._scheduled_tasks[task_id]
 
-        p = TaskProcess(task, self._id, self._task_result_queue,
-                        random_seed=bool(self.worker_processes > 1),
-                        worker_timeout=self._config.timeout)
+        p = self._create_task_process(task)
 
         self._running_tasks[task_id] = p
 
@@ -644,6 +657,22 @@ class Worker(object):
         else:
             # Run in the same process
             p.run()
+
+    def _create_task_process(self, task):
+        def update_tracking_url(tracking_url):
+            self._scheduler.add_task(
+                task_id=task.task_id,
+                worker=self._id,
+                status=RUNNING,
+                tracking_url=tracking_url,
+            )
+
+        return TaskProcess(
+            task, self._id, self._task_result_queue,
+            random_seed=bool(self.worker_processes > 1),
+            worker_timeout=self._config.timeout,
+            tracking_url_callback=update_tracking_url,
+        )
 
     def _purge_children(self):
         """
@@ -707,8 +736,6 @@ class Worker(object):
                            new_deps=new_deps,
                            assistant=self._assistant)
 
-            if status == RUNNING:
-                continue
             self._running_tasks.pop(task_id)
 
             # re-add task to reschedule missing dependencies
@@ -724,14 +751,15 @@ class Worker(object):
                 if reschedule:
                     self.add(task)
 
-            self.run_succeeded &= status in (DONE, SUSPENDED)
+            self.run_succeeded &= (status == DONE) or (len(new_deps) > 0)
             return
 
     def _sleeper(self):
         # TODO is exponential backoff necessary?
         while True:
-            wait_interval = self._config.wait_interval + random.uniform(1, 5)
-            logger.debug('Sleeping for %d seconds', wait_interval)
+            jitter = self._config.wait_jitter
+            wait_interval = self._config.wait_interval + random.uniform(0, jitter)
+            logger.debug('Sleeping for %f seconds', wait_interval)
             time.sleep(wait_interval)
             yield
 
@@ -755,9 +783,9 @@ class Worker(object):
 
     def handle_interrupt(self, signum, _):
         """
-        Stops the assistant from asking for more work on SIGTERM
+        Stops the assistant from asking for more work on SIGUSR1
         """
-        if signum == signal.SIGTERM:
+        if signum == signal.SIGUSR1:
             self._config.keep_alive = False
             self._stop_requesting_work = True
 

@@ -147,12 +147,13 @@ class RemoteScheduler(Scheduler):
         return result["response"]
 
     def ping(self, worker):
-        # just one attemtps, keep-alive thread will keep trying anyway
+        # just one attempt, keep-alive thread will keep trying anyway
         self._request('/api/ping', {'worker': worker}, attempts=1)
 
     def add_task(self, worker, task_id, status=PENDING, runnable=True,
                  deps=None, new_deps=None, expl=None, resources=None, priority=0,
-                 family='', module=None, params=None, assistant=False):
+                 family='', module=None, params=None, assistant=False,
+                 tracking_url=None):
         self._request('/api/add_task', {
             'task_id': task_id,
             'worker': worker,
@@ -167,14 +168,13 @@ class RemoteScheduler(Scheduler):
             'module': module,
             'params': params,
             'assistant': assistant,
+            'tracking_url': tracking_url,
         })
 
     def get_work(self, worker, host=None, assistant=False):
         return self._request(
             '/api/get_work',
-            {'worker': worker, 'host': host, 'assistant': assistant},
-            log_exceptions=False,
-            attempts=1)
+            {'worker': worker, 'host': host, 'assistant': assistant})
 
     def graph(self):
         return self._request('/api/graph', {})

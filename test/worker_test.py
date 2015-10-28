@@ -191,6 +191,45 @@ class WorkerTest(unittest.TestCase):
         self.assertFalse(a.has_run)
         self.assertFalse(b.has_run)
 
+    def test_tracking_url(self):
+        tracking_url = 'http://test_url.com/'
+
+        class A(Task):
+            has_run = False
+
+            def complete(self):
+                return self.has_run
+
+            def run(self, tracking_url_callback=None):
+                if tracking_url_callback is not None:
+                    tracking_url_callback(tracking_url)
+                self.has_run = True
+
+        a = A()
+        self.assertTrue(self.w.add(a))
+        self.assertTrue(self.w.run())
+        tasks = self.sch.task_list('DONE', '')
+        self.assertEqual(1, len(tasks))
+        self.assertEqual(tracking_url, tasks['A()']['tracking_url'])
+
+    def test_type_error_in_tracking_run(self):
+        class A(Task):
+            num_runs = 0
+
+            def complete(self):
+                return False
+
+            def run(self, tracking_url_callback=None):
+                self.num_runs += 1
+                raise TypeError('bad type')
+
+        a = A()
+        self.assertTrue(self.w.add(a))
+        self.assertFalse(self.w.run())
+
+        # Should only run and fail once, not retry because of the type error
+        self.assertEqual(1, a.num_runs)
+
     def test_fail(self):
         class CustomException(BaseException):
             def __init__(self, msg):
@@ -678,7 +717,7 @@ class WorkerEmailTest(unittest.TestCase):
         self.assertEqual(emails, [])
         worker.add(a)
         self.assertEqual(self.waits, 2)  # should attempt to add it 3 times
-        self.assertNotEquals(emails, [])
+        self.assertNotEqual(emails, [])
         self.assertTrue(emails[0].find("Luigi: Framework error while scheduling %s" % (a,)) != -1)
         worker.stop()
 
@@ -941,8 +980,8 @@ class TaskLimitTest(unittest.TestCase):
         w.run()
         self.assertFalse(t.complete())
         leaf_tasks = [ForkBombTask(3, 2, branch) for branch in [(0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1)]]
-        self.assertEquals(3, sum(t.complete() for t in leaf_tasks),
-                          "should have gracefully completed as much as possible even though the single last leaf didn't get scheduled")
+        self.assertEqual(3, sum(t.complete() for t in leaf_tasks),
+                         "should have gracefully completed as much as possible even though the single last leaf didn't get scheduled")
 
     @with_config({'core': {'worker-task-limit': '7'}})
     def test_task_limit_not_exceeded(self):
@@ -968,3 +1007,39 @@ class WorkerConfigurationTest(unittest.TestCase):
         """
         Worker(wait_interval=1)  # This shouldn't raise
         self.assertRaises(AssertionError, Worker, wait_interval=0)
+
+
+class WorkerWaitJitterTest(unittest.TestCase):
+    @with_config({'worker': {'wait_jitter': '10.0'}})
+    @mock.patch("random.uniform")
+    @mock.patch("time.sleep")
+    def test_wait_jitter(self, mock_sleep, mock_random):
+        """ verify configured jitter amount """
+        mock_random.return_value = 1.0
+
+        w = Worker()
+        x = w._sleeper()
+        six.next(x)
+        mock_random.assert_called_with(0, 10.0)
+        mock_sleep.assert_called_with(2.0)
+
+        mock_random.return_value = 2.0
+        six.next(x)
+        mock_random.assert_called_with(0, 10.0)
+        mock_sleep.assert_called_with(3.0)
+
+    @mock.patch("random.uniform")
+    @mock.patch("time.sleep")
+    def test_wait_jitter_default(self, mock_sleep, mock_random):
+        """ verify default jitter is as expected """
+        mock_random.return_value = 1.0
+        w = Worker()
+        x = w._sleeper()
+        six.next(x)
+        mock_random.assert_called_with(0, 5.0)
+        mock_sleep.assert_called_with(2.0)
+
+        mock_random.return_value = 3.3
+        six.next(x)
+        mock_random.assert_called_with(0, 5.0)
+        mock_sleep.assert_called_with(4.3)

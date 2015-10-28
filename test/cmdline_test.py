@@ -23,7 +23,7 @@ except ImportError:
 import mock
 import os
 import subprocess
-from helpers import unittest, parsing
+from helpers import unittest
 
 from luigi import six
 
@@ -154,6 +154,7 @@ class InvokeOverCmdlineTest(unittest.TestCase):
     def _run_cmdline(self, args):
         env = os.environ.copy()
         env['PYTHONPATH'] = env.get('PYTHONPATH', '') + ':.:test'
+        print('Running: ' + ' '.join(args))  # To simplify rerunning failing tests
         p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         stdout, stderr = p.communicate()  # Unfortunately subprocess.check_output is 2.7+
         return p.returncode, stdout, stderr
@@ -177,7 +178,7 @@ class InvokeOverCmdlineTest(unittest.TestCase):
         self.assertTrue(t.exists())
 
     def test_direct_python_help(self):
-        returncode, stdout, stderr = self._run_cmdline(['python', 'test/cmdline_test.py', '--help'])
+        returncode, stdout, stderr = self._run_cmdline(['python', 'test/cmdline_test.py', '--help-all'])
         self.assertTrue(stdout.find(b'--FooBaseClass-x') != -1)
         self.assertFalse(stdout.find(b'--x') != -1)
 
@@ -187,18 +188,39 @@ class InvokeOverCmdlineTest(unittest.TestCase):
         self.assertTrue(stdout.find(b'--x') != -1)
 
     def test_bin_luigi_help(self):
-        returncode, stdout, stderr = self._run_cmdline(['./bin/luigi', '--module', 'cmdline_test', '--help'])
+        returncode, stdout, stderr = self._run_cmdline(['./bin/luigi', '--module', 'cmdline_test', '--help-all'])
         self.assertTrue(stdout.find(b'--FooBaseClass-x') != -1)
         self.assertFalse(stdout.find(b'--x') != -1)
 
     def test_python_module_luigi_help(self):
-        returncode, stdout, stderr = self._run_cmdline(['python', '-m', 'luigi', '--module', 'cmdline_test', '--help'])
+        returncode, stdout, stderr = self._run_cmdline(['python', '-m', 'luigi', '--module', 'cmdline_test', '--help-all'])
         self.assertTrue(stdout.find(b'--FooBaseClass-x') != -1)
         self.assertFalse(stdout.find(b'--x') != -1)
 
     def test_bin_luigi_help_no_module(self):
         returncode, stdout, stderr = self._run_cmdline(['./bin/luigi', '--help'])
         self.assertTrue(stdout.find(b'usage:') != -1)
+
+    def test_bin_luigi_help_not_spammy(self):
+        """
+        Test that `luigi --help` fits on one screen
+        """
+        returncode, stdout, stderr = self._run_cmdline(['./bin/luigi', '--help'])
+        self.assertLessEqual(len(stdout.splitlines()), 15)
+
+    def test_bin_luigi_all_help_spammy(self):
+        """
+        Test that `luigi --help-all` doesn't fit on a screen
+
+        Naturally, I don't mind this test breaking, but it convinces me that
+        the "not spammy" test is actually testing what it claims too.
+        """
+        returncode, stdout, stderr = self._run_cmdline(['./bin/luigi', '--help-all'])
+        self.assertGreater(len(stdout.splitlines()), 15)
+
+    def test_error_mesage_on_misspelled_task(self):
+        returncode, stdout, stderr = self._run_cmdline(['./bin/luigi', 'RangeDaili'])
+        self.assertTrue(stderr.find(b'RangeDaily') != -1)
 
     def test_bin_luigi_no_parameters(self):
         returncode, stdout, stderr = self._run_cmdline(['./bin/luigi'])
@@ -218,18 +240,24 @@ class InvokeOverCmdlineTest(unittest.TestCase):
         self.assertTrue(stdout.find(b'--FooBaseClass-x') != -1)
         self.assertTrue(stdout.find(b'--x') != -1)
 
+    def test_bin_luigi_options_before_task(self):
+        args = ['./bin/luigi', '--module', 'cmdline_test', '--no-lock', '--local-scheduler', '--FooBaseClass-x', 'hello', 'FooBaseClass']
+        returncode, stdout, stderr = self._run_cmdline(args)
+        self.assertEqual(0, returncode)
 
-class NewStyleParameters822Test(unittest.TestCase):
-    # See https://github.com/spotify/luigi/issues/822
+    def test_bin_fail_on_unrecognized_args(self):
+        returncode, stdout, stderr = self._run_cmdline(['./bin/luigi', '--no-lock', '--local-scheduler', 'Task', '--unknown-param', 'hiiii'])
+        self.assertNotEqual(0, returncode)
 
-    @parsing(['FooSubClass', '--x', 'xyz', '--FooBaseClass-x', 'xyz'])
-    def test_subclasses(self):
-        self.assertEquals(FooSubClass().x, 'xyz')
-
-    @parsing(['FooBaseClass', '--FooBaseClass-x', 'xyz'])
-    def test_subclasses_2(self):
-        # https://github.com/spotify/luigi/issues/822#issuecomment-77782714
-        self.assertEquals(FooBaseClass().x, 'xyz')
+    def test_deps_py_script(self):
+        """
+        Test the deps.py script.
+        """
+        args = 'python luigi/tools/deps.py --module examples.top_artists ArtistToplistToDatabase --date-interval 2015-W10'.split()
+        returncode, stdout, stderr = self._run_cmdline(args)
+        self.assertEqual(0, returncode)
+        self.assertTrue(stdout.find(b'[FileSystem] data/streams_2015_03_04_faked.tsv') != -1)
+        self.assertTrue(stdout.find(b'[DB] localhost') != -1)
 
 
 if __name__ == '__main__':

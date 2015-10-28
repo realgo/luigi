@@ -227,6 +227,7 @@
                 <a href="#{{taskId}}" class="btn btn-info btn-xs" title="View graph" data-toggle="tooltip"><i class="fa fa-sitemap"></i></a>
                 {{#error}}<button class="btn btn-danger btn-xs showError" title="Show error" data-toggle="tooltip"><i class="fa fa-bug"></i></button>{{/error}}
                 {{#re_enable}}<a class="btn btn-warning btn-xs re-enable-button" title="Re-enable" data-toggle="tooltip" data-task-id="{{taskId}}">Re-enable</a>{{/re_enable}}
+                {{#trackingUrl}}<a target="_blank" href="{{trackingUrl}}" class="btn btn-primary btn-xs" title="Track Progress" data-toggle="tooltip"><i class="fa fa-eye"></i></a>{{/trackingUrl}}
             </div>
         </script>
         <script type="text/template" name="rowDetailsTemplate">
@@ -286,7 +287,9 @@
                         <td>{{priority}}</td>
                         <td>{{resources}}</td>
                         <td>{{displayTime}}</td>
-                        <td><a href="#{{taskId}}" class="btn btn-info btn-xs" title="View graph" data-toggle="tooltip" data-action="drawGraph"><i class="fa fa-sitemap"/></a></td>
+                        <td><a href="#{{taskId}}" class="btn btn-info btn-xs" title="View graph" data-toggle="tooltip" data-action="drawGraph"><i class="fa fa-sitemap"/></a>
+                            {{#trackingUrl}}<a target="_blank" href="{{trackingUrl}}" class="btn btn-primary btn-xs" title="Track Progress" data-toggle="tooltip"><i class="fa fa-eye"></i></a>{{/trackingUrl}}
+                        </td>
                       </tr>
                       {{/tasks}}
                       {{/num_running}}
@@ -369,8 +372,8 @@
             <section id="taskList" class="container-fluid tab-pane active">
                 <div class="row">
                   <div class="col-md-3 col-sm-6 col-xs-12">
-                    <div class="info-box" data-color='yellow' data-category='PENDING' id="PENDING_info">
-                      <span class="info-box-icon bg-yellow"><i class="fa fa-pause"></i></span>
+                    <div class="info-box status-info" data-color='yellow' data-category='PENDING' id="PENDING_info">
+                      <span class="info-box-icon bg-yellow"><i class="fa fa-spinner fa-pulse"></i></span>
                       <div class="info-box-content">
                         <span class="info-box-text">Pending Tasks</span>
                         <span class="info-box-number">?</span>
@@ -379,8 +382,8 @@
                   </div>
 
                   <div class="col-md-3 col-sm-6 col-xs-12">
-                    <div class="info-box" data-color='aqua' data-category='RUNNING' id="RUNNING_info">
-                      <span class="info-box-icon bg-aqua"><i class="fa fa-play"></i></span>
+                    <div class="info-box status-info" data-color='aqua' data-category='RUNNING' id="RUNNING_info">
+                      <span class="info-box-icon bg-aqua"><i class="fa fa-spinner fa-pulse"></i></span>
                       <div class="info-box-content">
                         <span class="info-box-text">Running Tasks</span>
                         <span class="info-box-number">?</span>
@@ -389,8 +392,8 @@
                   </div>
 
                   <div class="col-md-3 col-sm-6 col-xs-12">
-                    <div class="info-box" data-color='green' data-category='DONE' id="DONE_info">
-                      <span class="info-box-icon bg-green"><i class="fa fa-check"></i></span>
+                    <div class="info-box status-info" data-color='green' data-category='DONE' id="DONE_info">
+                      <span class="info-box-icon bg-green"><i class="fa fa-spinner fa-pulse"></i></span>
                       <div class="info-box-content">
                         <span class="info-box-text">Done Tasks</span>
                         <span class="info-box-number">?</span>
@@ -399,8 +402,8 @@
                   </div>
 
                   <div class="col-md-3 col-sm-6 col-xs-12">
-                    <div class="info-box" data-color='red' data-category='FAILED' id="FAILED_info">
-                      <span class="info-box-icon bg-red"><i class="fa fa-times"></i></span>
+                    <div class="info-box status-info" data-color='red' data-category='FAILED' id="FAILED_info">
+                      <span class="info-box-icon bg-red"><i class="fa fa-spinner fa-pulse"></i></span>
                       <div class="info-box-content">
                         <span class="info-box-text">Failed Tasks</span>
                         <span class="info-box-number">?</span>
@@ -409,8 +412,8 @@
                   </div>
 
                   <div class="col-md-3 col-sm-6 col-xs-12">
-                    <div class="info-box" data-color='maroon' data-category='UPSTREAM_FAILED' id="UPSTREAM_FAILED_info">
-                      <span class="info-box-icon bg-maroon"><i class="fa fa-warning"></i></span>
+                    <div class="info-box status-info" data-color='maroon' data-category='UPSTREAM_FAILED' id="UPSTREAM_FAILED_info">
+                      <span class="info-box-icon bg-maroon"><i class="fa fa-spinner fa-pulse"></i></span>
                       <div class="info-box-content">
                         <span class="info-box-text">Upstream Failure</span>
                         <span class="info-box-number">?</span>
@@ -419,8 +422,8 @@
                   </div>
 
                   <div class="col-md-3 col-sm-6 col-xs-12">
-                    <div class="info-box" data-color='gray' data-category='DISABLED' id="DISABLED_info">
-                      <span class="info-box-icon bg-gray"><i class="fa fa-minus-circle"></i></span>
+                    <div class="info-box status-info" data-color='gray' data-category='DISABLED' id="DISABLED_info">
+                      <span class="info-box-icon bg-gray"><i class="fa fa-spinner fa-pulse"></i></span>
                       <div class="info-box-content">
                         <span class="info-box-text">Disabled Tasks</span>
                         <span class="info-box-number">?</span>
@@ -429,8 +432,8 @@
                   </div>
 
                   <div class="col-md-3 col-sm-6 col-xs-12">
-                    <div class="info-box" data-color='gray' data-category='UPSTREAM_DISABLED' id="UPSTREAM_DISABLED_info">
-                      <span class="info-box-icon bg-gray"><i class="fa fa-warning"></i></span>
+                    <div class="info-box status-info" data-color='gray' data-category='UPSTREAM_DISABLED' id="UPSTREAM_DISABLED_info">
+                      <span class="info-box-icon bg-gray"><i class="fa fa-spinner fa-pulse"></i></span>
                       <div class="info-box-content">
                         <span class="info-box-text">Upstream Disabled</span>
                         <span class="info-box-number">?</span>

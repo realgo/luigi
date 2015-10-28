@@ -16,7 +16,7 @@
 #
 
 import datetime
-from helpers import with_config, LuigiTestCase, parsing
+from helpers import with_config, LuigiTestCase, parsing, in_parse, RunOnceTask
 from datetime import timedelta
 
 import luigi
@@ -36,6 +36,10 @@ class A(luigi.Task):
 
 class WithDefault(luigi.Task):
     x = luigi.Parameter(default='xyz')
+
+
+class WithDefaultTrue(luigi.Task):
+    x = luigi.BoolParameter(default=True)
 
 
 class Foo(luigi.Task):
@@ -173,6 +177,9 @@ class ParameterTest(LuigiTestCase):
         self.run_locally(['Baz', '--bool'])
         self.assertEqual(Baz._val, True)
 
+    def test_bool_default_true(self):
+        self.assertTrue(WithDefaultTrue().x)
+
     def test_forgot_param(self):
         self.assertRaises(luigi.parameter.MissingParameterException, self.run_locally, ['ForgotParam'],)
 
@@ -180,7 +187,7 @@ class ParameterTest(LuigiTestCase):
     def test_forgot_param_in_dep(self, emails):
         # A programmatic missing parameter will cause an error email to be sent
         self.run_locally(['ForgotParamDep'])
-        self.assertNotEquals(emails, [])
+        self.assertNotEqual(emails, [])
 
     def test_default_param_cmdline(self):
         self.assertEqual(WithDefault().x, 'xyz')
@@ -240,7 +247,7 @@ class TestNewStyleGlobalParameters(LuigiTestCase):
         MockTarget.fs.clear()
 
     def expect_keys(self, expected):
-        self.assertEquals(set(MockTarget.fs.get_all_data().keys()), set(expected))
+        self.assertEqual(set(MockTarget.fs.get_all_data().keys()), set(expected))
 
     def test_x_arg(self):
         self.run_locally(['Banana', '--x', 'foo', '--y', 'bar', '--style', 'x-arg'])
@@ -418,6 +425,11 @@ class TestParamWithDefaultFromConfig(LuigiTestCase):
     def testBool(self):
         p = luigi.BoolParameter(config_path=dict(section="foo", name="bar"))
         self.assertEqual(True, _value(p))
+
+    @with_config({"foo": {"bar": "false"}})
+    def testBoolConfigOutranksDefault(self):
+        p = luigi.BoolParameter(default=True, config_path=dict(section="foo", name="bar"))
+        self.assertEqual(False, _value(p))
 
     @with_config({"foo": {"bar": "2001-02-03-2001-02-28"}})
     def testDateInterval(self):
@@ -639,11 +651,11 @@ class TestSerializeDateParameters(LuigiTestCase):
 
     def testSerialize(self):
         date = datetime.date(2013, 2, 3)
-        self.assertEquals(luigi.DateParameter().serialize(date), '2013-02-03')
-        self.assertEquals(luigi.YearParameter().serialize(date), '2013')
-        self.assertEquals(luigi.MonthParameter().serialize(date), '2013-02')
+        self.assertEqual(luigi.DateParameter().serialize(date), '2013-02-03')
+        self.assertEqual(luigi.YearParameter().serialize(date), '2013')
+        self.assertEqual(luigi.MonthParameter().serialize(date), '2013-02')
         dt = datetime.datetime(2013, 2, 3, 4, 5)
-        self.assertEquals(luigi.DateHourParameter().serialize(dt), '2013-02-03T04')
+        self.assertEqual(luigi.DateHourParameter().serialize(dt), '2013-02-03T04')
 
 
 class TestTaskParameter(LuigiTestCase):
@@ -676,3 +688,106 @@ class TestTaskParameter(LuigiTestCase):
         self.assertEqual(MetaTask.saved_value, MetaTask)
         self.assertTrue(self.run_locally_split('mynamespace.MetaTask --a other_namespace.OtherTask'))
         self.assertEqual(MetaTask.saved_value, OtherTask)
+
+
+class NewStyleParameters822Test(LuigiTestCase):
+    """
+    I bet these tests created at 2015-03-08 are reduntant by now (Oct 2015).
+    But maintaining them anyway, just in case I have overlooked something.
+    """
+    # See https://github.com/spotify/luigi/issues/822
+
+    def test_subclasses(self):
+        class BarBaseClass(luigi.Task):
+            x = luigi.Parameter(default='bar_base_default')
+
+        class BarSubClass(BarBaseClass):
+            pass
+
+        in_parse(['BarSubClass', '--x', 'xyz', '--BarBaseClass-x', 'xyz'],
+                 lambda task: self.assertEqual(task.x, 'xyz'))
+
+        # https://github.com/spotify/luigi/issues/822#issuecomment-77782714
+        in_parse(['BarBaseClass', '--BarBaseClass-x', 'xyz'],
+                 lambda task: self.assertEqual(task.x, 'xyz'))
+
+
+class LocalParameters1304Test(LuigiTestCase):
+    """
+    It was discussed and decided that local parameters (--x) should be
+    semantically different from global parameters (--MyTask-x).
+
+    The former sets only the parsed root task, and the later sets the parameter
+    for all the tasks.
+
+    https://github.com/spotify/luigi/issues/1304#issuecomment-148402284
+    """
+    def test_local_params(self):
+
+        class MyTask(RunOnceTask):
+            param1 = luigi.IntParameter()
+            param2 = luigi.BoolParameter(default=False)
+
+            def requires(self):
+                if self.param1 > 0:
+                    yield MyTask(param1=(self.param1 - 1))
+
+            def run(self):
+                assert self.param1 == 1 or not self.param2
+                self.comp = True
+
+        self.assertTrue(self.run_locally_split('MyTask --param1 1 --param2'))
+
+    def test_local_takes_precedence(self):
+
+        class MyTask(luigi.Task):
+            param = luigi.IntParameter()
+
+            def complete(self):
+                return False
+
+            def run(self):
+                assert self.param == 5
+
+        self.assertTrue(self.run_locally_split('MyTask --param 5 --MyTask-param 6'))
+
+    def test_local_only_affects_root(self):
+
+        class MyTask(RunOnceTask):
+            param = luigi.IntParameter(default=3)
+
+            def requires(self):
+                assert self.param != 3
+                if self.param == 5:
+                    yield MyTask()
+
+        # It would be a cyclic dependency if local took precedence
+        self.assertTrue(self.run_locally_split('MyTask --param 5 --MyTask-param 6'))
+
+    def test_range_doesnt_propagate_args(self):
+        """
+        Ensure that ``--task Range --of Blah --blah-arg 123`` doesn't work.
+
+        This will of course not work unless support is explicitly added for it.
+        But being a bit paranoid here and adding this test case so that if
+        somebody decides to add it in the future, they'll be redircted to the
+        dicussion in #1304
+        """
+
+        class Blah(RunOnceTask):
+            date = luigi.DateParameter()
+            blah_arg = luigi.IntParameter()
+
+        # The SystemExit is assumed to be thrown by argparse
+        self.assertRaises(SystemExit, self.run_locally_split, 'RangeDailyBase --of Blah --start 2015-01-01 --task-limit 1 --blah-arg 123')
+        self.assertTrue(self.run_locally_split('RangeDailyBase --of Blah --start 2015-01-01 --task-limit 1 --Blah-blah-arg 123'))
+
+
+class TaskAsParameterName1335Test(LuigiTestCase):
+    def test_parameter_can_be_named_task(self):
+
+        class MyTask(luigi.Task):
+            # Indeed, this is not the most realistic example, but still ...
+            task = luigi.IntParameter()
+
+        self.assertTrue(self.run_locally_split('MyTask --task 5'))

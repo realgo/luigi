@@ -145,6 +145,11 @@ class S3Client(FileSystem):
         delete_key_list = [
             k for k in s3_bucket.list(self._add_path_delimiter(key))]
 
+        # delete the directory marker file if it exists
+        s3_dir_with_suffix_key = s3_bucket.get_key(key + S3_DIRECTORY_MARKER_SUFFIX_0)
+        if s3_dir_with_suffix_key:
+            delete_key_list.append(s3_dir_with_suffix_key)
+
         if len(delete_key_list) > 0:
             for k in delete_key_list:
                 logger.debug('Deleting %s from bucket %s', k, bucket)
@@ -240,6 +245,36 @@ class S3Client(FileSystem):
                 # storage consumed by uploaded parts
                 mp.cancel_upload()
             raise
+
+    def get(self, s3_path, destination_local_path):
+        """
+        Get an object stored in S3 and write it to a local path.
+        """
+        (bucket, key) = self._path_to_bucket_and_key(s3_path)
+
+        # grab and validate the bucket
+        s3_bucket = self.s3.get_bucket(bucket, validate=True)
+
+        # download the file
+        s3_key = Key(s3_bucket)
+        s3_key.key = key
+        s3_key.get_contents_to_filename(destination_local_path)
+
+    def get_as_string(self, s3_path):
+        """
+        Get the contents of an object stored in S3 as a string.
+        """
+        (bucket, key) = self._path_to_bucket_and_key(s3_path)
+
+        # grab and validate the bucket
+        s3_bucket = self.s3.get_bucket(bucket, validate=True)
+
+        # get the content
+        s3_key = Key(s3_bucket)
+        s3_key.key = key
+        contents = s3_key.get_contents_as_string()
+
+        return contents
 
     def copy(self, source_path, destination_path):
         """

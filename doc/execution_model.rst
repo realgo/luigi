@@ -31,6 +31,21 @@ Luigi helps you *encode the dependencies* of tasks and build up chains.
 Furthermore, Luigi's scheduler makes sure that there's centralized view of the dependency graph and
 that the same job will not be executed by multiple workers simultaneously.
 
+Scheduler
+~~~~~~~~~
+
+A client only starts the ``run()`` method of a task when the single threaded
+central scheduler have permitted it. Since the number of tasks is usually very
+small (in comparision with the petabytes of data one task is processing), we
+can afford the convenience of a simple centralised server.
+
+.. figure:: https://tarrasch.github.io/luigid-basics-jun-2015/img/50.gif
+   :alt: Scheduling gif
+
+The gif is from `this presentation
+<https://tarrasch.github.io/luigid-basics-jun-2015/>`__, which is about the
+client and server interaction.
+
 Triggering tasks
 ~~~~~~~~~~~~~~~~
 
@@ -58,14 +73,14 @@ If it has, it will run the full dependency graph.
     class DataDump(luigi.ExternalTask):
         date = luigi.DateParameter()
         def output(self): return luigi.contrib.hdfs.HdfsTarget(self.date.strftime('/var/log/dump/%Y-%m-%d.txt'))
-        
+
     class AggregationTask(luigi.Task):
         date = luigi.DateParameter()
         window = luigi.IntParameter()
         def requires(self): return [DataDump(self.date - datetime.timedelta(i)) for i in xrange(self.window)]
         def run(self): run_some_cool_stuff(self.input())
         def output(self): return luigi.contrib.hdfs.HdfsTarget('/aggregated-%s-%d' % (self.date, self.window))
-        
+
     class RunAll(luigi.Task):
         ''' Dummy task that triggers execution of a other tasks'''
         def requires(self):

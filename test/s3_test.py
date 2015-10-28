@@ -106,7 +106,8 @@ class TestS3Client(unittest.TestCase):
     def setUp(self):
         f = tempfile.NamedTemporaryFile(mode='wb', delete=False)
         self.tempFilePath = f.name
-        f.write(b"I'm a temporary file for testing\n")
+        self.tempFileContents = b"I'm a temporary file for testing\n"
+        f.write(self.tempFileContents)
         f.close()
         self.addCleanup(os.remove, self.tempFilePath)
 
@@ -204,6 +205,30 @@ class TestS3Client(unittest.TestCase):
         self.assertTrue(s3_client.exists('s3://mybucket/tempdir2'))
         self.assertFalse(s3_client.exists('s3://mybucket/tempdir'))
 
+    def test_get(self):
+        # put a file on s3 first
+        s3_client = S3Client(AWS_ACCESS_KEY, AWS_SECRET_KEY)
+        s3_client.s3.create_bucket('mybucket')
+        s3_client.put(self.tempFilePath, 's3://mybucket/putMe')
+
+        tmp_file = tempfile.NamedTemporaryFile(delete=True)
+        tmp_file_path = tmp_file.name
+
+        s3_client.get('s3://mybucket/putMe', tmp_file_path)
+        self.assertEquals(tmp_file.read(), self.tempFileContents)
+
+        tmp_file.close()
+
+    def test_get_as_string(self):
+        # put a file on s3 first
+        s3_client = S3Client(AWS_ACCESS_KEY, AWS_SECRET_KEY)
+        s3_client.s3.create_bucket('mybucket')
+        s3_client.put(self.tempFilePath, 's3://mybucket/putMe')
+
+        contents = s3_client.get_as_string('s3://mybucket/putMe')
+
+        self.assertEquals(contents, self.tempFileContents)
+
     def test_get_key(self):
         s3_client = S3Client(AWS_ACCESS_KEY, AWS_SECRET_KEY)
         s3_client.s3.create_bucket('mybucket')
@@ -245,14 +270,14 @@ class TestS3Client(unittest.TestCase):
         s3_client.put_string("", 's3://mybucket/hello/frank')
         s3_client.put_string("", 's3://mybucket/hello/world')
 
-        self.assertEquals(['s3://mybucket/hello/frank', 's3://mybucket/hello/world'],
-                          list(s3_client.listdir('s3://mybucket/hello')))
-        self.assertEquals(['s3://mybucket/hello/frank', 's3://mybucket/hello/world'],
-                          list(s3_client.listdir('s3://mybucket/hello/')))
-        self.assertEquals(['frank', 'world'],
-                          list(s3_client.list('s3://mybucket/hello')))
-        self.assertEquals(['frank', 'world'],
-                          list(s3_client.list('s3://mybucket/hello/')))
+        self.assertEqual(['s3://mybucket/hello/frank', 's3://mybucket/hello/world'],
+                         list(s3_client.listdir('s3://mybucket/hello')))
+        self.assertEqual(['s3://mybucket/hello/frank', 's3://mybucket/hello/world'],
+                         list(s3_client.listdir('s3://mybucket/hello/')))
+        self.assertEqual(['frank', 'world'],
+                         list(s3_client.list('s3://mybucket/hello')))
+        self.assertEqual(['frank', 'world'],
+                         list(s3_client.list('s3://mybucket/hello/')))
 
     def test_remove(self):
         s3_client = S3Client(AWS_ACCESS_KEY, AWS_SECRET_KEY)
@@ -284,6 +309,12 @@ class TestS3Client(unittest.TestCase):
             InvalidDeleteException,
             lambda: s3_client.remove('s3://mybucket/removemedir', recursive=False)
         )
+
+        # test that the marker file created by Hadoop S3 Native FileSystem is removed
+        s3_client.put(self.tempFilePath, 's3://mybucket/removemedir/file')
+        s3_client.put_string("", 's3://mybucket/removemedir_$folder$')
+        self.assertTrue(s3_client.remove('s3://mybucket/removemedir'))
+        self.assertFalse(s3_client.exists('s3://mybucket/removemedir_$folder$'))
 
     def _run_multipart_test(self, part_size, file_size):
         file_contents = b"a" * file_size

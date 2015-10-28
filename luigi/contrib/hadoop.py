@@ -44,8 +44,6 @@ import tempfile
 import warnings
 from hashlib import md5
 from itertools import groupby
-import cached_property
-
 from luigi import six
 
 from luigi import configuration
@@ -66,7 +64,10 @@ except ImportError:
 
 logger = logging.getLogger('luigi-interface')
 
-_attached_packages = [cached_property]
+_attached_packages = []
+
+
+TRACKING_RE = re.compile(r'(tracking url|the url to track the job):\s+(?P<url>.+)$')
 
 
 class hadoop(luigi.task.Config):
@@ -212,6 +213,7 @@ class HadoopRunContext(object):
 
     def __init__(self):
         self.job_id = None
+        self.application_id = None
 
     def __enter__(self):
         self.__old_signal = signal.getsignal(signal.SIGTERM)
@@ -219,7 +221,10 @@ class HadoopRunContext(object):
         return self
 
     def kill_job(self, captured_signal=None, stack_frame=None):
-        if self.job_id:
+        if self.application_id:
+            logger.info('Job interrupted, killing application %s' % self.application_id)
+            subprocess.call(['yarn', 'application', '-kill', self.application_id])
+        elif self.job_id:
             logger.info('Job interrupted, killing job %s', self.job_id)
             subprocess.call(['mapred', 'job', '-kill', self.job_id])
         if captured_signal is not None:
@@ -278,6 +283,7 @@ def run_and_track_hadoop_job(arglist, tracking_url_callback=None, env=None):
         # This URL is useful for fetching the logs of the job.
         tracking_url = None
         job_id = None
+        application_id = None
         err_lines = []
 
         with HadoopRunContext() as hadoop_context:
@@ -288,8 +294,9 @@ def run_and_track_hadoop_job(arglist, tracking_url_callback=None, env=None):
                 if err_line:
                     logger.info('%s', err_line)
                 err_line = err_line.lower()
-                if err_line.find('tracking url') != -1:
-                    tracking_url = err_line.split('tracking url: ')[-1]
+                tracking_url_match = TRACKING_RE.search(err_line)
+                if tracking_url_match:
+                    tracking_url = tracking_url_match.group('url')
                     try:
                         tracking_url_callback(tracking_url)
                     except Exception as e:
@@ -301,7 +308,10 @@ def run_and_track_hadoop_job(arglist, tracking_url_callback=None, env=None):
                 if err_line.find('submitted hadoop job:') != -1:
                     # scalding output
                     job_id = err_line.split('submitted hadoop job: ')[-1]
+                if err_line.find('submitted application ') != -1:
+                    application_id = err_line.split('submitted application ')[-1]
                 hadoop_context.job_id = job_id
+                hadoop_context.application_id = application_id
 
         # Read the rest + stdout
         err = ''.join(err_lines + [an_err_line for an_err_line in proc.stderr])
@@ -400,7 +410,7 @@ class HadoopJobRunner(JobRunner):
         self.end_job_with_atomic_move_dir = end_job_with_atomic_move_dir
         self.tmp_dir = False
 
-    def run_job(self, job):
+    def run_job(self, job, tracking_url_callback=None):
         packages = [luigi] + self.modules + job.extra_modules() + list(_attached_packages)
 
         # find the module containing the job
@@ -513,7 +523,7 @@ class HadoopJobRunner(JobRunner):
 
         job.dump(self.tmp_dir)
 
-        run_and_track_hadoop_job(arglist)
+        run_and_track_hadoop_job(arglist, tracking_url_callback=tracking_url_callback)
 
         if self.end_job_with_atomic_move_dir:
             luigi.contrib.hdfs.HdfsTarget(output_hadoop).move_dir(output_final)
@@ -660,9 +670,25 @@ class BaseHadoopJobTask(luigi.Task):
     def init_hadoop(self):
         pass
 
-    def run(self):
+    # available formats are "python" and "json".
+    data_interchange_format = "python"
+
+    def run(self, tracking_url_callback=None):
+        # The best solution is to store them as lazy `cached_property`, but it
+        # has extraneous dependency. And `property` is slow (need to be
+        # calculated every time when called), so we save them as attributes
+        # directly.
+        self.serialize = DataInterchange[self.data_interchange_format]['serialize']
+        self.internal_serialize = DataInterchange[self.data_interchange_format]['internal_serialize']
+        self.deserialize = DataInterchange[self.data_interchange_format]['deserialize']
+
         self.init_local()
-        self.job_runner().run_job(self)
+        try:
+            self.job_runner().run_job(self, tracking_url_callback=tracking_url_callback)
+        except TypeError as ex:
+            if 'unexpected keyword argument' not in ex.message:
+                raise
+            self.job_runner().run_job(self)
 
     def requires_local(self):
         """
@@ -712,9 +738,6 @@ class JobTask(BaseHadoopJobTask):
     n_reduce_tasks = 25
     reducer = NotImplemented
 
-    # available formats are "python" and "json".
-    data_interchange_format = "python"
-
     def jobconfs(self):
         jcs = super(JobTask, self).jobconfs()
         if self.reducer == NotImplemented:
@@ -722,18 +745,6 @@ class JobTask(BaseHadoopJobTask):
         else:
             jcs.append('mapred.reduce.tasks=%s' % self.n_reduce_tasks)
         return jcs
-
-    @cached_property.cached_property
-    def serialize(self):
-        return DataInterchange[self.data_interchange_format]['serialize']
-
-    @cached_property.cached_property
-    def internal_serialize(self):
-        return DataInterchange[self.data_interchange_format]['internal_serialize']
-
-    @cached_property.cached_property
-    def deserialize(self):
-        return DataInterchange[self.data_interchange_format]['deserialize']
 
     def init_mapper(self):
         pass
@@ -879,8 +890,11 @@ class JobTask(BaseHadoopJobTask):
             missing = []
             for src, dst in self._links:
                 d = os.path.dirname(dst)
-                if d and not os.path.exists(d):
-                    os.makedirs(d)
+                if d:
+                    try:
+                        os.makedirs(d)
+                    except OSError:
+                        pass
                 if not os.path.exists(src):
                     missing.append(src)
                     continue
